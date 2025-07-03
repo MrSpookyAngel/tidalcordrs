@@ -1,0 +1,74 @@
+install cmake < 3.5
+install rust
+
+APK: com.aspiro.tidal_2.63.0-1069_minAPI23(arm64-v8a,armeabi-v7a,x86,x86_64)(nodpi)_apkmirror.com.apk
+Client ID: pSoioUnTRTmHJune
+Client Secret: LEyNG8kf8rNxsmV5FGgO47uOwsNW8SroHpmSOrirObE=
+
+-----
+
+https://omega.idv.tw/kdb120/viewthread.php?threadid=4741
+
+https://gist.github.com/yaronzz/48d01f5a24b4b7b37f19443977c22cd6 
+
+Client: bits
+ID: GzkAnGAH9GluAKST
+Secret: T1BT0rHy4KGrqZ1
+Device Auth: false
+
+Client: default_automotive
+ID: zU4XHVVkc2tDPo4t
+Secret: VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4=
+Device Auth: true
+
+Client: default_clear
+ID: 03Gxi46ezfOR9VYx
+Secret: my2p5AKqYfMp2zXulKnqX0jlXtsLNnT6xybFvf3Q3xA=
+Device Auth: false
+
+Client: default_clear_dolby_atmos
+ID: O8m8TenhETTs1ePw
+Secret: GbJfUmIV5FdWLj1ppuc47q6G803QXq96cU3EnFAE6xc=
+Device Auth: false
+
+Client: default
+ID: pSoioUnTRTmHJune
+Secret: LEyNG8kf8rNxsmV5FGgO47uOwsNW8SroHpmSOrirObE=
+Device Auth: false
+
+Client: default_dolby_atmos
+ID: eMgw0HZqwX7Gffvj
+Secret: uYKrLzAwLf7N8401Nl62Y37FKdtx93tHIh9sTK9mkUA=
+Device Auth: false
+
+****
+Client: default_tv
+ID: COFVfUXkiLTN3lAe
+Secret: DzcOwwEiEWPtMj4RXQ4Y2EwGIKWMGiV05KCQuqhXdzU=
+Device Auth: true
+****
+
+Client: default_tv_dolby_atmos
+ID: N0MuL7eBEFb5hGX8
+Secret: hpYPlIdiel3xWXtDYRLzGJJIST55yjWuMXKxR9nAjQo=
+Device Auth: true
+
+Client: facebook_portal_mini
+ID: KDNEfww06haSofNC
+Secret: ognkmDdzAk2G2fMh1hiVfzlaQLkdEttBqNOA8qhpuQs=
+Device Auth: true
+
+Client: fire_tv
+ID: rrkl9M8MdqYVFpA2
+Secret: lRMtLxD2XJseOhMufg9PrkiE7YszQhqzBCFQ7FLiKrA=
+Device Auth: true
+
+Client: fire_tv_dolby_atmos
+ID: 7m7Ap0JC9j1cOM3n
+Secret: vRAdA108tlvkJpTsGZS8rGZ7xTlbJ0qaZ2K9saEzsgY=
+Device Auth: true
+
+Client: free_tier
+ID: jo0MWwLMMvMIrBia
+Secret: YsYOQIqRWua2vMPjNW2kBeiGErnjF5WioR9uCG5dXqM=
+Device Auth: false
