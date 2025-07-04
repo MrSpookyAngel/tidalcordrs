@@ -1,8 +1,8 @@
-use poise::serenity_prelude as serenity;
-use songbird::SerenityInit;
-
 mod commands;
 mod session;
+
+use poise::serenity_prelude as serenity;
+use songbird::SerenityInit;
 
 #[tokio::main]
 async fn main() {

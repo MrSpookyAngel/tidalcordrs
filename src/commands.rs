@@ -54,7 +54,7 @@ pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
             ctx.say(e.to_string()).await?;
         }
     }
-    
+
     Ok(())
 }
 

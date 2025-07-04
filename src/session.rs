@@ -17,8 +17,7 @@ struct SessionResponse {
     session_id: String,
     #[serde(rename = "userId")]
     _user_id: u64,
-    #[serde(rename = "countryCode")]
-    _country_code: String,
+    country_code: String,
     #[serde(rename = "channelId")]
     _channel_id: u64,
     #[serde(rename = "partnerId")]
@@ -30,7 +29,7 @@ struct SessionResponse {
 #[derive(serde::Deserialize, Debug)]
 struct TokenResponse {
     access_token: String,
-    refresh_token: String,
+    refresh_token: Option<String>,
     token_type: String,
     #[serde(rename = "expires_in")]
     _expires_in: u64,
@@ -43,21 +42,14 @@ struct Token {
     access_token: String,
     refresh_token: String,
     token_type: String,
-    session_id: String,
 }
 
 impl Token {
-    pub fn new(
-        access_token: String,
-        refresh_token: String,
-        token_type: String,
-        session_id: String,
-    ) -> Self {
+    pub fn new(access_token: String, refresh_token: String, token_type: String) -> Self {
         Token {
             access_token,
             refresh_token,
             token_type,
-            session_id,
         }
     }
 }
@@ -70,6 +62,7 @@ pub struct Config {
     oauth_token_url: reqwest::Url,
     path_to_session: String,
     sessions_url: reqwest::Url,
+    search_limit: String,
     pub user_agent: String,
 }
 
@@ -89,6 +82,7 @@ impl Config {
                 .unwrap_or_else(|_| "data/tidal_token.json".to_string()),
             sessions_url: reqwest::Url::parse("https://api.tidal.com/v1/sessions")
                 .expect("Invalid URL for sessions"),
+            search_limit: std::env::var("TIDAL_SEARCH_LIMIT").unwrap_or_else(|_| "10".to_string()),
             user_agent: "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.3".to_string(),
         }
     }
@@ -101,6 +95,7 @@ pub struct Session {
     refresh_token: String,
     token_type: String,
     session_id: String,
+    country_code: String,
 }
 
 impl Session {
@@ -112,6 +107,7 @@ impl Session {
             refresh_token: String::new(),
             token_type: String::new(),
             session_id: String::new(),
+            country_code: String::new(),
         }
     }
 
@@ -157,26 +153,15 @@ impl Session {
             login_response.verification_uri_complete
         );
 
-        (self.access_token, self.refresh_token, self.token_type) =
-            self.get_token_response(login_response).await?;
-        self.session_id = self.get_session_id().await?;
-
-        let token = Token::new(
-            self.access_token.clone(),
-            self.refresh_token.clone(),
-            self.token_type.clone(),
-            self.session_id.clone(),
-        );
-
-        self.save_token_to_file(token)?;
+        self.create_token(login_response).await?;
 
         Ok(())
     }
 
-    async fn get_token_response(
-        &self,
+    async fn create_token(
+        &mut self,
         login_response: LoginResponse,
-    ) -> Result<(String, String, String), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut token_url = self.config.oauth_token_url.clone();
         token_url
             .query_pairs_mut()
@@ -186,6 +171,10 @@ impl Session {
             .append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
             .append_pair("scope", "r_usr w_usr w_sub");
 
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("User-Agent", self.config.user_agent.parse()?);
+        headers.insert("Content-Type", "application/x-www-form-urlencoded".parse()?);
+
         let interval = tokio::time::Duration::from_secs(login_response.interval);
         let mut counter = 0;
 
@@ -193,20 +182,37 @@ impl Session {
             let response = self
                 .client
                 .post(token_url.clone())
-                .header("Content-Type", "application/x-www-form-urlencoded")
+                .headers(headers.clone())
                 .send()
                 .await;
 
             match response {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        let TokenResponse {
-                            access_token,
-                            refresh_token,
-                            token_type,
-                            ..
-                        } = serde_json::from_str(&resp.text().await?)?;
-                        return Ok((access_token, refresh_token, token_type));
+                        let token_response: TokenResponse =
+                            serde_json::from_str(&resp.text().await?)?;
+
+                        self.access_token = token_response.access_token.clone();
+                        self.refresh_token = token_response
+                            .refresh_token
+                            .expect("Refresh token is missing")
+                            .clone();
+                        self.token_type = token_response.token_type.clone();
+
+                        (self.session_id, self.country_code) = {
+                            let session_response = self.get_session_response().await?;
+                            (session_response.session_id, session_response.country_code)
+                        };
+
+                        let token = Token::new(
+                            self.access_token.clone(),
+                            self.refresh_token.clone(),
+                            self.token_type.clone(),
+                        );
+                        self.save_token_to_file(token)?;
+
+                        println!("Token created successfully.");
+                        return Ok(());
                     } else {
                         tokio::time::sleep(interval).await;
                         counter += login_response.interval;
@@ -217,11 +223,58 @@ impl Session {
                 }
             }
         }
-
         Err("Failed to verify login within the allowed time".into())
     }
 
-    async fn get_session_id(&self) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn refresh_token(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut token_url = self.config.oauth_token_url.clone();
+        token_url
+            .query_pairs_mut()
+            .append_pair("client_id", &self.config.tidal_client_id)
+            .append_pair("client_secret", &self.config.tidal_client_secret)
+            .append_pair("refresh_token", &self.refresh_token)
+            .append_pair("grant_type", "refresh_token")
+            .append_pair("scope", "r_usr w_usr w_sub");
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("User-Agent", self.config.user_agent.parse()?);
+        headers.insert("Content-Type", "application/x-www-form-urlencoded".parse()?);
+
+        let response = self.client.post(token_url).headers(headers).send().await;
+
+        match response {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    let token_response: TokenResponse = serde_json::from_str(&resp.text().await?)?;
+
+                    self.access_token = token_response.access_token;
+                    self.token_type = token_response.token_type;
+
+                    (self.session_id, self.country_code) = {
+                        let session_response = self.get_session_response().await?;
+                        (session_response.session_id, session_response.country_code)
+                    };
+
+                    let token = Token::new(
+                        self.access_token.clone(),
+                        self.refresh_token.clone(),
+                        self.token_type.clone(),
+                    );
+
+                    self.save_token_to_file(token)?;
+
+                    return Ok(());
+                } else {
+                    return Err("Failed to refresh token".into());
+                }
+            }
+            Err(e) => {
+                return Err(format!("Error refreshing token: {}", e).into());
+            }
+        }
+    }
+
+    async fn get_session_response(&self) -> Result<SessionResponse, Box<dyn std::error::Error>> {
         let sessions_url = self.config.sessions_url.clone();
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -243,7 +296,7 @@ impl Session {
 
         let session_response: SessionResponse = serde_json::from_str(&response.text().await?)?;
 
-        Ok(session_response.session_id)
+        Ok(session_response)
     }
 
     fn save_token_to_file(&self, token: Token) -> Result<(), Box<dyn std::error::Error>> {
@@ -263,8 +316,55 @@ impl Session {
         self.access_token = token.access_token.clone();
         self.refresh_token = token.refresh_token.clone();
         self.token_type = token.token_type.clone();
-        self.session_id = token.session_id.clone();
+        (self.session_id, self.country_code) = {
+            let session_response = self.get_session_response().await?;
+            (session_response.session_id, session_response.country_code)
+        };
 
         Ok(())
+    }
+
+    pub async fn search(
+        &self,
+        query: &str,
+        search_types: Option<&str>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let search_types = search_types.unwrap_or("artists,albums,playlists,tracks,videos");
+
+        let mut search_url = reqwest::Url::parse("https://api.tidal.com/v1/search")?;
+        search_url
+            .query_pairs_mut()
+            .append_pair("query", query)
+            .append_pair("limit", &self.config.search_limit)
+            .append_pair("countryCode", &self.country_code)
+            .append_pair("offset", "0")
+            .append_pair("types", search_types);
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("User-Agent", self.config.user_agent.parse()?);
+        headers.insert(
+            "Authorization",
+            format!("{} {}", self.token_type, self.access_token).parse()?,
+        );
+
+        println!("Search URL: {}", search_url);
+        println!("Headers: {:?}", headers);
+
+        let response = self.client.get(search_url).headers(headers).send().await;
+
+        match response {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    let text = resp.text().await?;
+                    return Ok(text.parse::<serde_json::Value>()?);
+                } else {
+                    return Err(format!("Search failed with status: {}", resp.status()).into());
+                }
+            }
+            Err(e) => {
+                println!("Please check your access token and network connection.");
+                return Err(format!("Error during search: {}", e).into());
+            }
+        }
     }
 }
