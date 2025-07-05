@@ -1,5 +1,6 @@
 mod commands;
 mod session;
+mod track;
 
 use poise::serenity_prelude as serenity;
 use songbird::SerenityInit;
@@ -7,7 +8,7 @@ use songbird::SerenityInit;
 #[tokio::main]
 async fn main() {
     // Load environment variables from .env file if it exists
-    dotenvy::dotenv().ok();
+    dotenvy::dotenv_override().ok();
 
     // Retrieve the Discord token from the environment
     let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
