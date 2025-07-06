@@ -1,4 +1,6 @@
-pub struct Data {}
+pub struct Data {
+    pub session: tokio::sync::Mutex<crate::session::Session>,
+}
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
@@ -61,9 +63,27 @@ pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(slash_command, prefix_command, aliases("play", "p"))]
 pub async fn play(
     ctx: Context<'_>,
-    #[description = "Provide the query or url of a song"] query_or_url: String,
+    #[description = "Provide the query or url of a song"]
+    #[rest]
+    query_or_url: String,
 ) -> Result<(), Error> {
-    ctx.say(format!("Playing: {query_or_url}")).await?;
+    let mut session = ctx.data().session.lock().await;
+
+    let tracks = session
+        .find_tracks(&query_or_url, 1)
+        .await
+        .map_err(|e| Error::from(e.to_string()))?;
+
+    ctx.say(format!("Found {} tracks", tracks.len())).await?;
+
+    if !(tracks.is_empty()) {
+        let track = tracks.first().unwrap();
+        ctx.say(format!("Playing track: {}", track.title)).await?;
+        
+        println!("Track details: {:?}", track);
+    } else {
+        ctx.say("No tracks found for the given query").await?;
+    }
 
     Ok(())
 }

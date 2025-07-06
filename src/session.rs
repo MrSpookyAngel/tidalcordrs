@@ -1,5 +1,7 @@
 use crate::track;
 
+use crate::commands::Error;
+
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct LoginResponse {
@@ -67,7 +69,6 @@ pub struct Config {
     sessions_url: String,
     session_validity_url: String,
     search_url: String,
-    search_limit: String,
 }
 
 impl Config {
@@ -84,7 +85,6 @@ impl Config {
             sessions_url: "https://api.tidal.com/v1/sessions".to_string(),
             session_validity_url: "https://api.tidal.com/v1/users/{user_id}/subscription".to_string(),
             search_url: "https://api.tidal.com/v1/search".to_string(),
-            search_limit: std::env::var("TIDAL_SEARCH_LIMIT").unwrap_or_else(|_| "10".to_string()),
         }
     }
 }
@@ -115,7 +115,7 @@ impl Session {
         }
     }
 
-    pub async fn start(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start(&mut self) -> Result<(), Error> {
         // Attempt to load the token from the file
         if let Ok(()) = self.load_token_from_file().await {
             println!("Token loaded from file successfully.");
@@ -139,7 +139,7 @@ impl Session {
         Ok(())
     }
 
-    async fn login(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn login(&mut self) -> Result<(), Error> {
         let auth_url = self.config.oauth_device_auth_url.clone();
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -171,10 +171,7 @@ impl Session {
         Ok(())
     }
 
-    async fn create_token(
-        &mut self,
-        login_response: LoginResponse,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    async fn create_token(&mut self, login_response: LoginResponse) -> Result<(), Error> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("User-Agent", self.config.user_agent.parse()?);
         headers.insert("Content-Type", "application/x-www-form-urlencoded".parse()?);
@@ -245,7 +242,7 @@ impl Session {
         Err("Failed to verify login within the allowed time".into())
     }
 
-    pub async fn refresh_token(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn refresh_token(&mut self) -> Result<(), Error> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("User-Agent", self.config.user_agent.parse()?);
         headers.insert("Content-Type", "application/x-www-form-urlencoded".parse()?);
@@ -300,7 +297,7 @@ impl Session {
         }
     }
 
-    async fn get_session_response(&self) -> Result<SessionResponse, Box<dyn std::error::Error>> {
+    async fn get_session_response(&self) -> Result<SessionResponse, Error> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("User-Agent", self.config.user_agent.parse()?);
         headers.insert(
@@ -323,7 +320,7 @@ impl Session {
         Ok(session_response)
     }
 
-    fn save_token_to_file(&self, token: Token) -> Result<(), Box<dyn std::error::Error>> {
+    fn save_token_to_file(&self, token: Token) -> Result<(), Error> {
         if let Some(parent) = std::path::Path::new(&self.config.path_to_session).parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -335,7 +332,7 @@ impl Session {
         Ok(())
     }
 
-    async fn load_token_from_file(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn load_token_from_file(&mut self) -> Result<(), Error> {
         if !std::path::Path::new(&self.config.path_to_session).exists() {
             return Err("Session file does not exist".into());
         }
@@ -364,7 +361,9 @@ impl Session {
         &self,
         query: &str,
         search_types: Option<&str>,
-    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        limit: u32,
+    ) -> Result<serde_json::Value, Error> {
+        let limit = limit.to_string();
         let search_types = search_types.unwrap_or("artists,albums,playlists,tracks,videos");
 
         let mut headers = reqwest::header::HeaderMap::new();
@@ -377,7 +376,7 @@ impl Session {
 
         let mut params = std::collections::HashMap::new();
         params.insert("query", query);
-        params.insert("limit", &self.config.search_limit);
+        params.insert("limit", &limit);
         params.insert("countryCode", &self.country_code);
         params.insert("offset", "0");
         params.insert("types", search_types);
@@ -419,21 +418,23 @@ impl Session {
     pub async fn find_tracks(
         &mut self,
         query: &str,
-    ) -> Result<Vec<track::Track>, Box<dyn std::error::Error>> {
+        limit: u32,
+    ) -> Result<Vec<track::Track>, Error> {
         async fn try_search(
             this: &crate::session::Session,
             query: &str,
-        ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-            let res = this.search(query, Some("tracks")).await?;
+            limit: u32,
+        ) -> Result<serde_json::Value, Error> {
+            let res = this.search(query, Some("tracks"), limit).await?;
             Ok(res)
         }
 
-        let mut search_result = try_search(self, query).await;
+        let mut search_result = try_search(self, query, limit).await;
 
         // If search fails, refresh token and try again
         if search_result.is_err() {
             self.refresh_token().await?;
-            search_result = try_search(self, query).await;
+            search_result = try_search(self, query, limit).await;
         }
 
         let search_result = search_result?;
