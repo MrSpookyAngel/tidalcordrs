@@ -1,6 +1,5 @@
-use crate::track;
-
 use crate::commands::Error;
+use crate::track;
 
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -67,7 +66,6 @@ pub struct Config {
     oauth_device_auth_url: String,
     oauth_token_url: String,
     sessions_url: String,
-    session_validity_url: String,
     search_url: String,
 }
 
@@ -83,7 +81,6 @@ impl Config {
             oauth_device_auth_url: "https://auth.tidal.com/v1/oauth2/device_authorization".to_string(),
             oauth_token_url: "https://auth.tidal.com/v1/oauth2/token".to_string(),
             sessions_url: "https://api.tidal.com/v1/sessions".to_string(),
-            session_validity_url: "https://api.tidal.com/v1/users/{user_id}/subscription".to_string(),
             search_url: "https://api.tidal.com/v1/search".to_string(),
         }
     }
@@ -119,14 +116,26 @@ impl Session {
         // Attempt to load the token from the file
         if let Ok(()) = self.load_token_from_file().await {
             println!("Token loaded from file successfully.");
-            (self.session_id, self.country_code, self.user_id) = {
-                let session_response = self.get_session_response().await?;
-                (
-                    session_response.session_id,
-                    session_response.country_code,
-                    session_response.user_id,
-                )
-            };
+            match self.set_session_response().await {
+                Ok(()) => {
+                    println!("Session started successfully.");
+                }
+                Err(e) => {
+                    println!("Failed to set session response: {}", e);
+                    println!("Attempting to refresh token.");
+                    self.refresh_token().await?;
+
+                    if let Err(e) = self.set_session_response().await {
+                        println!(
+                            "Failed to set session response after refreshing token: {}",
+                            e
+                        );
+                        println!("Perhaps you should try to re-login.");
+                    }
+
+                    return Err(e);
+                }
+            }
             return Ok(());
         } else {
             println!("No token found, starting device authorization flow.");
@@ -211,14 +220,7 @@ impl Session {
                             .clone();
                         self.token_type = token_response.token_type.clone();
 
-                        (self.session_id, self.country_code, self.user_id) = {
-                            let session_response = self.get_session_response().await?;
-                            (
-                                session_response.session_id,
-                                session_response.country_code,
-                                session_response.user_id,
-                            )
-                        };
+                        self.set_session_response().await?;
 
                         let token = Token::new(
                             self.access_token.clone(),
@@ -269,14 +271,7 @@ impl Session {
                     self.access_token = token_response.access_token;
                     self.token_type = token_response.token_type;
 
-                    (self.session_id, self.country_code, self.user_id) = {
-                        let session_response = self.get_session_response().await?;
-                        (
-                            session_response.session_id,
-                            session_response.country_code,
-                            session_response.user_id,
-                        )
-                    };
+                    self.set_session_response().await?;
 
                     let token = Token::new(
                         self.access_token.clone(),
@@ -297,7 +292,7 @@ impl Session {
         }
     }
 
-    async fn get_session_response(&self) -> Result<SessionResponse, Error> {
+    async fn set_session_response(&mut self) -> Result<(), Error> {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("User-Agent", self.config.user_agent.parse()?);
         headers.insert(
@@ -310,14 +305,18 @@ impl Session {
             .get(&self.config.sessions_url)
             .headers(headers)
             .send()
-            .await
-            .expect("Failed to get session ID")
-            .error_for_status()
-            .expect("Failed to get session ID");
+            .await?;
 
-        let session_response: SessionResponse = serde_json::from_str(&response.text().await?)?;
+        (self.session_id, self.country_code, self.user_id) = {
+            let session_response: SessionResponse = serde_json::from_str(&response.text().await?)?;
+            (
+                session_response.session_id,
+                session_response.country_code,
+                session_response.user_id,
+            )
+        };
 
-        Ok(session_response)
+        Ok(())
     }
 
     fn save_token_to_file(&self, token: Token) -> Result<(), Error> {
@@ -345,14 +344,6 @@ impl Session {
         self.access_token = token.access_token.clone();
         self.refresh_token = token.refresh_token.clone();
         self.token_type = token.token_type.clone();
-        (self.session_id, self.country_code, self.user_id) = {
-            let session_response = self.get_session_response().await?;
-            (
-                session_response.session_id,
-                session_response.country_code,
-                session_response.user_id,
-            )
-        };
 
         Ok(())
     }

@@ -3,10 +3,10 @@ pub struct Track {
     pub id: String,
     pub title: String,
     pub artist: String,
+    pub featured_artists: Vec<String>, // Can be empty
     pub album: String,
     pub duration: u32,
     pub stream_url: String,
-    pub is_available: bool,
 }
 
 impl Track {
@@ -23,7 +23,7 @@ impl Track {
             ("sessionId", session.session_id.as_str()),
             ("countryCode", session.country_code.as_str()),
             ("urlusagemode", "STREAM"),
-            ("audioquality", "HIGH"), // Assuming 'HIGH' is the desired quality
+            ("audioquality", "HIGH"),
             ("assetpresentation", "FULL"),
         ];
 
@@ -52,6 +52,14 @@ impl Track {
             .expect("Expected artist name")
             .to_string();
 
+        let featured_artists = track_response["artists"]
+            .as_array()
+            .expect("Expected artists array")
+            .iter()
+            .skip(1) // Skip main artist
+            .filter_map(|artist| artist["name"].as_str().map(String::from))
+            .collect();
+
         let album = track_response["album"]["title"]
             .as_str()
             .expect("Expected album title")
@@ -68,28 +76,14 @@ impl Track {
             .expect("Expected stream URL")
             .to_string();
 
-        let is_available = track_response["allowStreaming"]
-            .as_bool()
-            .expect("Expected allow streaming status");
-
         Track {
             id,
             title,
             artist,
+            featured_artists,
             album,
             duration,
             stream_url,
-            is_available,
         }
-    }
-
-    pub fn _print_info(&self) {
-        println!("Track ID: {}", self.id);
-        println!("Title: {}", self.title);
-        println!("Artist: {}", self.artist);
-        println!("Album: {}", self.album);
-        println!("Duration: {} seconds", self.duration);
-        println!("Stream URL: {}", self.stream_url);
-        println!("Is Available: {}", self.is_available);
     }
 }

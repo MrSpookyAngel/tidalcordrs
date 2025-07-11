@@ -1,5 +1,0 @@
-install cmake < 3.5
-install rust
-
-Client ID: zU4XHVVkc2tDPo4t
-Client Secret: VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4==
