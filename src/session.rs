@@ -99,8 +99,8 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new() -> Self {
-        Session {
+    pub async fn new() -> Self {
+        let mut session = Session {
             client: reqwest::Client::new(),
             config: Config::new(),
             access_token: String::new(),
@@ -109,10 +109,14 @@ impl Session {
             session_id: String::new(),
             country_code: String::new(),
             user_id: 0,
-        }
+        };
+
+        session.start().await.expect("Failed to start session.");
+
+        session
     }
 
-    pub async fn start(&mut self) -> Result<(), Error> {
+    async fn start(&mut self) -> Result<(), Error> {
         // Attempt to load the token from the file
         if let Ok(()) = self.load_token_from_file().await {
             println!("Token loaded from file successfully.");
@@ -121,19 +125,27 @@ impl Session {
                     println!("Session started successfully.");
                 }
                 Err(e) => {
-                    println!("Failed to set session response: {}", e);
+                    println!("Failed to set session response: {}.", e);
                     println!("Attempting to refresh token.");
+
+                    // If setting the session response fails, try to refresh the token
                     self.refresh_token().await?;
 
-                    if let Err(e) = self.set_session_response().await {
-                        println!(
-                            "Failed to set session response after refreshing token: {}",
-                            e
-                        );
-                        println!("Perhaps you should try to re-login.");
+                    // Retry setting the session response after refreshing the token
+                    match self.set_session_response().await {
+                        Ok(()) => {
+                            println!("Session response set successfully after refreshing token.");
+                            return Ok(());
+                        }
+                        Err(e2) => {
+                            println!(
+                                "Failed to set session response after refreshing token: {}",
+                                e2
+                            );
+                            println!("Perhaps you should try to delete your token and re-login.");
+                            return Err(e2);
+                        }
                     }
-
-                    return Err(e);
                 }
             }
             return Ok(());

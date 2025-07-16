@@ -1,3 +1,22 @@
+struct DeleteOnEvict {}
+
+impl foyer::EventListener for DeleteOnEvict {
+    type Key = String;
+    type Value = String;
+
+    fn on_leave(&self, _reason: foyer::Event, _key: &String, value: &String) {
+        println!("Deleting evicted track file: {}", value);
+        let track_file = std::path::Path::new(&value);
+        if let Err(e) = std::fs::remove_file(&track_file) {
+            eprintln!(
+                "Failed to delete evicted track file '{}': {}",
+                track_file.display(),
+                e
+            );
+        }
+    }
+}
+
 pub struct Storage {
     cache: foyer::HybridCache<String, String>,
 }
@@ -5,7 +24,10 @@ pub struct Storage {
 impl Storage {
     // Persistent LRU cache
     pub async fn new(cache_dir: &str, cache_max_size: usize) -> Result<Self, std::io::Error> {
+        let listener = std::sync::Arc::new(DeleteOnEvict {});
+
         let builder = foyer::HybridCacheBuilder::new()
+            // .with_event_listener(listener)
             .memory(cache_max_size)
             .with_eviction_config(foyer::EvictionConfig::Lru(foyer::LruConfig::default()))
             .with_weighter(|_key, path: &String| {
@@ -25,7 +47,7 @@ impl Storage {
             )
         })?;
 
-        Ok(Self { cache: hybrid })
+        Ok(Storage { cache: hybrid })
     }
 
     pub async fn get(&self, key: &str) -> Result<Option<String>, std::io::Error> {

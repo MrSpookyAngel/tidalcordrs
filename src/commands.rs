@@ -166,6 +166,36 @@ pub async fn volume(ctx: Context<'_>, volume: u8) -> Result<(), Error> {
     Ok(())
 }
 
+async fn download(url: &str, file_path: &str) -> Result<(), std::io::Error> {
+    // Verify ffmpeg is installed
+    if std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .is_err()
+    {
+        println!("FFmpeg is not installed or not found in the system PATH");
+
+        return Ok(());
+    }
+
+    // Create the directory for storing tracks if it doesn't exist
+    std::fs::create_dir_all("data/tracks").expect("Failed to create tracks directory");
+
+    // Use ffmpeg to download and convert the audio stream to opus format
+    // let file_path = format!("data/tracks/{}.opus", first_track.id);
+    let output = std::process::Command::new("ffmpeg")
+        .args([
+            "-n", "-i", &url, "-c:a", "libopus", "-f", "opus", &file_path,
+        ])
+        .output()
+        .expect("Failed to start ffmpeg process");
+    if !output.status.success() {
+        println!("Failed to download and/or convert audio stream with ffmpeg.");
+    }
+
+    Ok(())
+}
+
 #[poise::command(slash_command, prefix_command, aliases("play", "p"), guild_only)]
 pub async fn play(
     ctx: Context<'_>,
@@ -211,40 +241,35 @@ pub async fn play(
     if let Some(handler_lock) = manager.get(guild_id) {
         let mut handler = handler_lock.lock().await;
 
-        // Verify ffmpeg is installed
-        if std::process::Command::new("ffmpeg")
-            .arg("-version")
-            .output()
-            .is_err()
-        {
-            println!("FFmpeg is not installed or not found in the system PATH");
-            ctx.say("Error: check logs for details.").await?;
-
-            return Ok(());
-        }
-
-        // Create the directory for storing tracks if it doesn't exist
-        std::fs::create_dir_all("data/tracks").expect("Failed to create tracks directory");
-
-        // Use ffmpeg to download and convert the audio stream to opus format
-        let file_path = format!("data/tracks/{}.opus", first_track.id);
-        let output = std::process::Command::new("ffmpeg")
-            .args([
-                "-i",
-                &first_track.stream_url,
-                "-c:a",
-                "libopus",
-                "-f",
-                "opus",
-                &file_path,
-            ])
-            .output()
-            .expect("Failed to start ffmpeg process");
-        if !output.status.success() {
-            ctx.say("Failed to download and/or convert audio stream with ffmpeg.")
-                .await?;
-            return Ok(());
-        }
+        let storage = ctx.data().storage.lock().await;
+        let file_path = match storage.get(&first_track.id).await {
+            Ok(Some(path)) => {
+                println!(
+                    "Track '{}' found in storage, using cached file: {}",
+                    first_track.id, path
+                );
+                path
+            }
+            Ok(None) => {
+                println!(
+                    "Track '{}' not found in storage, downloading...",
+                    first_track.id
+                );
+                // If the track is not in storage, download it
+                let file_path = format!("data/tracks/{}.opus", first_track.id);
+                if let Err(e) = download(&first_track.stream_url, &file_path).await {
+                    ctx.say(format!("Failed to download track: {}", e)).await?;
+                    return Ok(());
+                }
+                storage.insert(first_track.id.clone(), file_path.clone());
+                file_path
+            }
+            Err(e) => {
+                ctx.say(format!("Failed to access storage: {}", e)).await?;
+                return Ok(());
+            }
+        };
+        drop(storage); // Release the lock
 
         // Create a songbird stream from the downloaded file
         let stream = songbird::input::File::new(file_path);
@@ -292,6 +317,37 @@ pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
         let _ = handler.queue().pause();
 
         ctx.say("Paused the playback.").await?;
+    } else {
+        ctx.say("Not connected to a voice channel.").await?;
+    }
+
+    Ok(())
+}
+
+#[poise::command(slash_command, prefix_command, aliases("resume, unpause"), guild_only)]
+pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
+    // Get the guild ID
+    let guild_id = match ctx.guild_id() {
+        Some(guild_id) => guild_id,
+        None => {
+            ctx.say("This command can only be used in a guild.").await?;
+            return Ok(());
+        }
+    };
+
+    // Get the songbird voice manager
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird voice manager not found")
+        .clone();
+
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let handler = handler_lock.lock().await;
+
+        // Resume the playback
+        let _ = handler.queue().resume();
+
+        ctx.say("Resumed the playback.").await?;
     } else {
         ctx.say("Not connected to a voice channel.").await?;
     }

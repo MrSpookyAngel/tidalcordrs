@@ -27,11 +27,7 @@ async fn main() {
         .expect("Expected a valid number for CACHE_MAX_SIZE");
 
     // Initialize the Tidal session
-    let mut tidal_session = session::Session::new();
-    tidal_session
-        .start()
-        .await
-        .expect("Failed to start Tidal session");
+    let tidal_session = session::Session::new().await;
 
     let storage = storage::Storage::new(&cache_dir, cache_max_size)
         .await
@@ -52,6 +48,7 @@ async fn main() {
                 commands::volume(),
                 commands::play(),
                 commands::pause(),
+                commands::resume(),
                 commands::skip(),
                 commands::stop(),
                 commands::current(),
