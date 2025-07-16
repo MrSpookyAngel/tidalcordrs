@@ -1,5 +1,3 @@
-use songbird::input::Compose;
-
 pub struct Data {
     pub session: tokio::sync::Mutex<crate::session::Session>,
     pub storage: tokio::sync::Mutex<crate::storage::Storage>,
