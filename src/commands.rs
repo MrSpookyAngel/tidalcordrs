@@ -1,3 +1,5 @@
+use songbird::input::Compose;
+
 pub struct Data {
     pub session: tokio::sync::Mutex<crate::session::Session>,
     pub storage: tokio::sync::Mutex<crate::storage::Storage>,
@@ -133,6 +135,39 @@ pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
     try_join_voice_channel(ctx).await
 }
 
+#[poise::command(slash_command, prefix_command, aliases("volume", "vol"), guild_only)]
+pub async fn volume(ctx: Context<'_>, volume: u8) -> Result<(), Error> {
+    // Get the guild ID
+    let guild_id = match ctx.guild_id() {
+        Some(guild_id) => guild_id,
+        None => {
+            ctx.say("This command can only be used in a guild.").await?;
+            return Ok(());
+        }
+    };
+
+    // Get the songbird voice manager
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird voice manager not found");
+
+    // Get the voice channel handler
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let handler = handler_lock.lock().await;
+
+        // Set the volume
+        handler.queue().current().as_mut().map(|track_handle| {
+            let _ = track_handle.set_volume(volume as f32 / 100.0);
+        });
+
+        ctx.say(format!("Volume set to {}.", volume)).await?;
+    } else {
+        ctx.say("Not connected to a voice channel.").await?;
+    }
+
+    Ok(())
+}
+
 #[poise::command(slash_command, prefix_command, aliases("play", "p"), guild_only)]
 pub async fn play(
     ctx: Context<'_>,
@@ -160,13 +195,22 @@ pub async fn play(
         }
     };
 
+    // Get the guild ID
+    let guild_id = match ctx.guild_id() {
+        Some(guild_id) => guild_id,
+        None => {
+            ctx.say("This command can only be used in a guild.").await?;
+            return Ok(());
+        }
+    };
+
     // Get the songbird voice manager
     let manager = songbird::get(ctx.serenity_context())
         .await
         .expect("Songbird voice manager not found")
         .clone();
 
-    if let Some(handler_lock) = manager.get(ctx.guild_id().unwrap()) {
+    if let Some(handler_lock) = manager.get(guild_id) {
         let mut handler = handler_lock.lock().await;
 
         // Verify ffmpeg is installed
@@ -206,9 +250,11 @@ pub async fn play(
 
         // Create a songbird stream from the downloaded file
         let stream = songbird::input::File::new(file_path);
+        let data = std::sync::Arc::new(first_track.clone());
+        let track = songbird::tracks::Track::new_with_data(stream.into(), data);
 
         // Add the track to the queue
-        let _ = handler.enqueue_input(stream.into()).await;
+        let _ = handler.enqueue(track).await;
 
         ctx.say(format!(
             "{} added **{}** to the queue.",
@@ -219,6 +265,37 @@ pub async fn play(
     } else {
         ctx.say("Not connected to a voice channel.").await?;
         return Ok(());
+    }
+
+    Ok(())
+}
+
+#[poise::command(slash_command, prefix_command, aliases("pause"), guild_only)]
+pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
+    // Get the guild ID
+    let guild_id = match ctx.guild_id() {
+        Some(guild_id) => guild_id,
+        None => {
+            ctx.say("This command can only be used in a guild.").await?;
+            return Ok(());
+        }
+    };
+
+    // Get the songbird voice manager
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird voice manager not found")
+        .clone();
+
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let handler = handler_lock.lock().await;
+
+        // Pause the playback
+        let _ = handler.queue().pause();
+
+        ctx.say("Paused the playback.").await?;
+    } else {
+        ctx.say("Not connected to a voice channel.").await?;
     }
 
     Ok(())
@@ -244,13 +321,121 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     if let Some(handler_lock) = manager.get(guild_id) {
         let handler = handler_lock.lock().await;
 
-        // Get the queue
-        let queue = handler.queue();
-
         // Skip the current track
-        let _ = queue.skip();
+        let _ = handler.queue().skip();
 
         ctx.say("Skipped the current track.").await?;
+    } else {
+        ctx.say("Not connected to a voice channel.").await?;
+    }
+
+    Ok(())
+}
+
+#[poise::command(slash_command, prefix_command, aliases("stop"), guild_only)]
+pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
+    // Get the guild ID
+    let guild_id = match ctx.guild_id() {
+        Some(guild_id) => guild_id,
+        None => {
+            ctx.say("This command can only be used in a guild.").await?;
+            return Ok(());
+        }
+    };
+
+    // Get the songbird voice manager
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird voice manager not found")
+        .clone();
+
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let handler = handler_lock.lock().await;
+
+        // Stop the playback and clear the queue
+        let _ = handler.queue().stop();
+
+        ctx.say("Stopped the playback and cleared the queue.")
+            .await?;
+    } else {
+        ctx.say("Not connected to a voice channel.").await?;
+    }
+
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("current", "currentplaying", "now", "nowplaying", "playing"),
+    guild_only
+)]
+pub async fn current(ctx: Context<'_>) -> Result<(), Error> {
+    // Get the guild ID
+    let guild_id = match ctx.guild_id() {
+        Some(guild_id) => guild_id,
+        None => {
+            ctx.say("This command can only be used in a guild.").await?;
+            return Ok(());
+        }
+    };
+
+    // Get the songbird voice manager
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird voice manager not found")
+        .clone();
+
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let handler = handler_lock.lock().await;
+
+        // Get the current playing track
+        if let Some(track_handle) = handler.queue().current() {
+            let track = track_handle.data::<crate::track::Track>().clone();
+            ctx.say(format!(
+                "Current track: **{}**",
+                get_formatted_track(&track)
+            ))
+            .await?;
+        } else {
+            ctx.say("No track is currently playing.").await?;
+        }
+    } else {
+        ctx.say("Not connected to a voice channel.").await?;
+    }
+
+    Ok(())
+}
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("leave", "disconnect"),
+    guild_only
+)]
+pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
+    // Get the guild ID
+    let guild_id = match ctx.guild_id() {
+        Some(guild_id) => guild_id,
+        None => {
+            ctx.say("This command can only be used in a guild.").await?;
+            return Ok(());
+        }
+    };
+
+    // Get the songbird voice manager
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird voice manager not found")
+        .clone();
+
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let mut handler = handler_lock.lock().await;
+
+        // Leave the voice channel
+        let _ = handler.leave().await;
+
+        println!("Left the voice channel. Guild ID: {}", guild_id);
     } else {
         ctx.say("Not connected to a voice channel.").await?;
     }

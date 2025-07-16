@@ -48,9 +48,14 @@ async fn main() {
         .options(poise::FrameworkOptions {
             commands: vec![
                 commands::ping(),
-                commands::play(),
                 commands::join(),
+                commands::volume(),
+                commands::play(),
+                commands::pause(),
                 commands::skip(),
+                commands::stop(),
+                commands::current(),
+                commands::leave(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some(prefix),
