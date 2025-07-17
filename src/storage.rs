@@ -1,66 +1,68 @@
-struct DeleteOnEvict {}
+pub struct LRUStorage {
+    pub storage_dir: std::path::PathBuf,
+    pub max_size: u64, // bytes
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
 
-impl foyer::EventListener for DeleteOnEvict {
-    type Key = String;
-    type Value = String;
-
-    fn on_leave(&self, _reason: foyer::Event, _key: &String, value: &String) {
-        println!("Deleting evicted track file: {}", value);
-        let track_file = std::path::Path::new(&value);
-        if let Err(e) = std::fs::remove_file(&track_file) {
-            eprintln!(
-                "Failed to delete evicted track file '{}': {}",
-                track_file.display(),
-                e
-            );
+impl LRUStorage {
+    pub fn new(storage_dir: &str, max_size: u64) -> Self {
+        let dir = std::path::PathBuf::from(storage_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        LRUStorage {
+            storage_dir: dir,
+            max_size,
+            lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }
     }
-}
 
-pub struct Storage {
-    cache: foyer::HybridCache<String, String>,
-}
+    async fn evict_if_needed(&self) -> Result<(), std::io::Error> {
+        let _ = self.lock.lock().await;
+        
+        let mut entries = tokio::fs::read_dir(&self.storage_dir).await?;
+        let mut files: Vec<(std::path::PathBuf, u64, u64)> = Vec::new();
+        let mut total_size = 0;
 
-impl Storage {
-    // Persistent LRU cache
-    pub async fn new(cache_dir: &str, cache_max_size: usize) -> Result<Self, std::io::Error> {
-        let listener = std::sync::Arc::new(DeleteOnEvict {});
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let metadata = entry.metadata().await?;
+            if metadata.is_file() {
+                let file_size = metadata.len() as u64;
+                let age_secs = metadata.accessed().unwrap().elapsed().unwrap().as_secs() as u64;
 
-        let builder = foyer::HybridCacheBuilder::new()
-            // .with_event_listener(listener)
-            .memory(cache_max_size)
-            .with_eviction_config(foyer::EvictionConfig::Lru(foyer::LruConfig::default()))
-            .with_weighter(|_key, path: &String| {
-                std::fs::metadata(std::path::Path::new(path))
-                    .map(|metadata| metadata.len() as usize)
-                    .unwrap_or(0)
-            })
-            .storage(foyer::Engine::Large)
-            .with_device_options(
-                foyer::DirectFsDeviceOptions::new(cache_dir).with_capacity(cache_max_size),
-            );
+                total_size += file_size;
+                files.push((path, file_size, age_secs));
+            }
+        }
 
-        let hybrid = builder.build().await.map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create hybrid cache: {}", e),
-            )
-        })?;
+        if total_size > self.max_size {
+            files.sort_by_key(|&(_, _, age)| std::cmp::Reverse(age));
 
-        Ok(Storage { cache: hybrid })
+            for (evict_path, file_size, _) in files {
+                if total_size <= self.max_size {
+                    break;
+                }
+                total_size -= file_size;
+                tokio::fs::remove_file(&evict_path).await?;
+                println!("Evicted file: {:?}", evict_path);
+            }
+        }
+
+        Ok(())
     }
 
-    pub async fn get(&self, key: &str) -> Result<Option<String>, std::io::Error> {
-        let entry = self
-            .cache
-            .get(&key.to_string())
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    pub async fn exists(&self, key: &str) -> bool {
+        let _ = self.lock.lock().await;
 
-        Ok(entry.map(|entry| entry.value().clone()))
+        let path = self.storage_dir.join(key);
+        tokio::fs::try_exists(&path).await.ok().unwrap_or(false)
     }
 
-    pub fn insert(&self, key: String, value: String) {
-        self.cache.insert(key, value);
+    pub async fn insert(&self, key: String, value: Vec<u8>) -> Result<(), std::io::Error> {
+        let _ = self.lock.lock().await;
+        
+        let path = self.storage_dir.join(key);
+        tokio::fs::write(path, value).await?;
+        self.evict_if_needed().await?;
+        Ok(())
     }
 }

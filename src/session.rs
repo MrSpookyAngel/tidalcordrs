@@ -76,12 +76,13 @@ impl Config {
             tidal_client_secret: std::env::var("TIDAL_CLIENT_SECRET")
                 .expect("TIDAL_CLIENT_SECRET must be set"),
             path_to_session: std::env::var("TIDAL_TOKEN_SESSION_PATH")
-            .unwrap_or_else(|_| "data/tidal_token.json".to_string()),
-            user_agent: "Mozilla/5.0 (Linux; Android 10; uis8581a2h10_Automotive) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36".to_string(),
-            oauth_device_auth_url: "https://auth.tidal.com/v1/oauth2/device_authorization".to_string(),
-            oauth_token_url: "https://auth.tidal.com/v1/oauth2/token".to_string(),
-            sessions_url: "https://api.tidal.com/v1/sessions".to_string(),
-            search_url: "https://api.tidal.com/v1/search".to_string(),
+                .expect("TIDAL_TOKEN_SESSION_PATH must be set"),
+            user_agent: std::env::var("USER_AGENT").expect("USER_AGENT must be set"),
+            oauth_device_auth_url: std::env::var("OAUTH_DEVICE_AUTH_URL")
+                .expect("OAUTH_DEVICE_AUTH_URL must be set"),
+            oauth_token_url: std::env::var("OAUTH_TOKEN_URL").expect("OAUTH_TOKEN_URL must be set"),
+            sessions_url: std::env::var("SESSIONS_URL").expect("SESSIONS_URL must be set"),
+            search_url: std::env::var("SEARCH_URL").expect("SEARCH_URL must be set"),
         }
     }
 }

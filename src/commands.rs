@@ -1,6 +1,6 @@
 pub struct Data {
     pub session: tokio::sync::Mutex<crate::session::Session>,
-    pub storage: tokio::sync::Mutex<crate::storage::Storage>,
+    pub storage: tokio::sync::Mutex<crate::storage::LRUStorage>,
 }
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
@@ -166,7 +166,7 @@ pub async fn volume(ctx: Context<'_>, volume: u8) -> Result<(), Error> {
     Ok(())
 }
 
-async fn download(url: &str, file_path: &str) -> Result<(), std::io::Error> {
+async fn download_to_bytes(url: &str) -> Result<Vec<u8>, std::io::Error> {
     // Verify ffmpeg is installed
     if std::process::Command::new("ffmpeg")
         .arg("-version")
@@ -175,25 +175,32 @@ async fn download(url: &str, file_path: &str) -> Result<(), std::io::Error> {
     {
         println!("FFmpeg is not installed or not found in the system PATH");
 
-        return Ok(());
+        return Ok(vec![]);
     }
 
-    // Create the directory for storing tracks if it doesn't exist
-    std::fs::create_dir_all("data/tracks").expect("Failed to create tracks directory");
-
     // Use ffmpeg to download and convert the audio stream to opus format
-    // let file_path = format!("data/tracks/{}.opus", first_track.id);
     let output = std::process::Command::new("ffmpeg")
         .args([
-            "-n", "-i", &url, "-c:a", "libopus", "-f", "opus", &file_path,
+            "-i",
+            &url,
+            "-c:a",
+            "libopus",
+            "-f",
+            "opus",
+            "pipe:1",
+            "-loglevel",
+            "error",
         ])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .spawn()?
+        .wait_with_output()
         .expect("Failed to start ffmpeg process");
+
     if !output.status.success() {
         println!("Failed to download and/or convert audio stream with ffmpeg.");
     }
 
-    Ok(())
+    Ok(output.stdout)
 }
 
 #[poise::command(slash_command, prefix_command, aliases("play", "p"), guild_only)]
@@ -241,32 +248,21 @@ pub async fn play(
     if let Some(handler_lock) = manager.get(guild_id) {
         let mut handler = handler_lock.lock().await;
 
+        // Get the file path for the track (and if needed, download it)
         let storage = ctx.data().storage.lock().await;
-        let file_path = match storage.get(&first_track.id).await {
-            Ok(Some(path)) => {
-                println!(
-                    "Track '{}' found in storage, using cached file: {}",
-                    first_track.id, path
-                );
-                path
+        let file_name = format!("{}.opus", first_track.id);
+        let file_path = match storage.exists(&file_name).await {
+            true => {
+                // If the track already exists in the storage, use it
+                println!("Track already exists in storage: {}", file_name);
+                storage.storage_dir.join(file_name)
             }
-            Ok(None) => {
-                println!(
-                    "Track '{}' not found in storage, downloading...",
-                    first_track.id
-                );
-                // If the track is not in storage, download it
-                let file_path = format!("data/tracks/{}.opus", first_track.id);
-                if let Err(e) = download(&first_track.stream_url, &file_path).await {
-                    ctx.say(format!("Failed to download track: {}", e)).await?;
-                    return Ok(());
-                }
-                storage.insert(first_track.id.clone(), file_path.clone());
+            false => {
+                // Download the track to the storage directory
+                let file_bytes = download_to_bytes(&first_track.stream_url).await?;
+                let file_path = storage.storage_dir.join(&file_name);
+                storage.insert(file_name, file_bytes).await?;
                 file_path
-            }
-            Err(e) => {
-                ctx.say(format!("Failed to access storage: {}", e)).await?;
-                return Ok(());
             }
         };
         drop(storage); // Release the lock

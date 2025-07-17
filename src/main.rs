@@ -10,28 +10,20 @@ use songbird::SerenityInit;
 async fn main() {
     // Load environment variables from .env file if it exists
     dotenvy::dotenv_override().ok();
-
-    // Retrieve the Discord token from the environment
     let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
-
-    // Retrieve command prefix from the environment, defaulting to "!"
-    let prefix = std::env::var("COMMAND_PREFIX").unwrap_or_else(|_| "!".to_string());
-
-    // Retrieve the cache directory from the environment, defaulting to "data/cache"
-    let cache_dir = std::env::var("CACHE_DIR").unwrap_or_else(|_| "data/cache".to_string());
-
-    // Retrieve the maximum cache size from the environment, defaulting to 20,000
-    let cache_max_size: usize = std::env::var("CACHE_MAX_SIZE")
-        .unwrap_or("20000".to_string())
+    let prefix =
+        std::env::var("COMMAND_PREFIX").expect("Expected a command prefix in the environment");
+    let storage_dir =
+        std::env::var("STORAGE_DIR").expect("Expected a storage directory in the environment");
+    let storage_max_size = std::env::var("STORAGE_MAX_SIZE_BYTES")
+        .expect("Expected a max size in the environment")
         .parse()
-        .expect("Expected a valid number for CACHE_MAX_SIZE");
+        .expect("Failed to parse STORAGE_MAX_SIZE_BYTES");
+
+    let storage = storage::LRUStorage::new(&storage_dir, storage_max_size);
 
     // Initialize the Tidal session
     let tidal_session = session::Session::new().await;
-
-    let storage = storage::Storage::new(&cache_dir, cache_max_size)
-        .await
-        .expect("Failed to create storage");
 
     // Set the intents
     let intents = serenity::GatewayIntents::GUILDS
