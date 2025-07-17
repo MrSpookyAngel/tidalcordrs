@@ -48,6 +48,9 @@ The creator of this project is not responsible for any misuse or violations of t
 4. Download the [`example.env`](https://github.com/MrSpookyAngel/tidalcordrs/blob/main/example.env) and place it inside the empty folder
    * Rename `example.env` to `.env`
 5. Update the `.env` as needed, but only the `DISCORD_TOKEN` is required to update from the default
-
+6. Run the program
+7. Visit the Tidal link shown in the console and authorize the device
+   * After authorizing, the console will say that your bot is connected
+8. Check out the [wiki](https://github.com/MrSpookyAngel/tidalcordrs/wiki) to view available commands and their usage
 ---
 
