@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - runner: ubuntu-latest
+            builder: cross
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          - runner: ubuntu-latest
+            builder: cross
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+          # Windows
+          - runner: ubuntu-latest
+            builder: cross
+            target: x86_64-pc-windows-gnu
+            ext: .exe
+          - runner: ubuntu-latest
+            builder: cross
+            target: aarch64-pc-windows-gnu
+            ext: .exe
+          # macOS
+          - runner: macos-latest
+            builder: native
+            target: x86_64-apple-darwin
+            ext: ""
+          - runner: macos-latest
+            builder: native
+            target: aarch64-apple-darwin
+            ext: ""
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install cross
+        if: matrix.builder == 'cross'
+        run: cargo install --locked cross
+
+      - name: Build with cross
+        if: matrix.builder == 'cross'
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build natively on macOS
+        if: matrix.builder == 'native'
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare dist directory
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/your_binary_name${{ matrix.ext }} \
+             dist/your_binary_name-${{ matrix.target }}${{ matrix.ext }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2.3.2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
