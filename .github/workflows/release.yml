@@ -49,6 +49,9 @@ jobs:
           toolchain: stable
           override: true
 
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Install cross
         if: matrix.builder == 'cross'
         run: cargo install --locked cross
