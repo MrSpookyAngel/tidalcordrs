@@ -64,8 +64,8 @@ jobs:
       - name: Prepare dist directory
         run: |
           mkdir -p dist
-          cp target/${{ matrix.target }}/release/your_binary_name${{ matrix.ext }} \
-             dist/your_binary_name-${{ matrix.target }}${{ matrix.ext }}
+          cp target/${{ matrix.target }}/release/tidalcordrs${{ matrix.ext }} \
+             dist/tidalcordrs-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
