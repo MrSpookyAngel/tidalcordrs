@@ -43,12 +43,12 @@ jobs:
 
           if [ "$osname" = "windows" ]; then
             for f in target/release/*.exe; do
-              cp "$f" "artifacts/tidalcordrs-$osname.exe"
+              cp "$f" "artifacts/tidalcordrs-$version-$osname.exe"
             done
           else
             for f in target/release/*; do
               if [ -f "$f" ] && [ -x "$f" ]; then
-                cp "$f" "artifacts/tidalcordrs-$osname"
+                cp "$f" "artifacts/tidalcordrs-$version-$osname"
               fi
             done
           fi
