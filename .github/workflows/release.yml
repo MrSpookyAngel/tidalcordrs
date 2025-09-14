@@ -41,6 +41,8 @@ jobs:
             osname="linux"
           fi
 
+          version="${{ github.ref_name }}"
+
           if [ "$osname" = "windows" ]; then
             for f in target/release/*.exe; do
               cp "$f" "artifacts/tidalcordrs-$version-$osname.exe"
