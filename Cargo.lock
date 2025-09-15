@@ -3167,7 +3167,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tidalcord"
+name = "tidalcordrs"
 version = "0.1.0"
 dependencies = [
  "dotenvy",

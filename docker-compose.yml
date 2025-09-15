@@ -1,0 +1,30 @@
+version: "3.8"
+
+services:
+  tidalcordrs:
+    image: ghcr.io/mrspookyangel/tidalcordrs:latest
+    container_name: tidalcordrs
+    restart: unless-stopped
+    environment:
+      # Credentials (change this)
+      DISCORD_TOKEN: "${DISCORD_TOKEN}"
+
+      # Configuration (change these as needed)
+      COMMAND_PREFIX: "!"
+      STORAGE_DIR: "data/tracks"
+      STORAGE_MAX_SIZE_BYTES: "1073741824" # 1 GiB
+      TIDAL_TOKEN_SESSION_PATH: "data/tidal_token.json"
+
+      # Requests Configuration (probably don't change these)
+      TIDAL_CLIENT_ID: "zU4XHVVkc2tDPo4t"
+      TIDAL_CLIENT_SECRET: "VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4="
+      USER_AGENT: "Mozilla/5.0 (Linux; Android 10; uis8581a2h10_Automotive) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36"
+      OAUTH_DEVICE_AUTH_URL: "https://auth.tidal.com/v1/oauth2/device_authorization"
+      OAUTH_TOKEN_URL: "https://auth.tidal.com/v1/oauth2/token"
+      SESSIONS_URL: "https://api.tidal.com/v1/sessions"
+      SEARCH_URL: "https://api.tidal.com/v1/search"
+    volumes:
+      - app-data:/app/data
+
+volumes:
+  app-data:
