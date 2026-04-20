@@ -6,6 +6,82 @@ mod track;
 use poise::serenity_prelude as serenity;
 use songbird::SerenityInit;
 
+async fn event_handler(
+    ctx: &serenity::Context,
+    event: &serenity::FullEvent,
+    _framework: poise::FrameworkContext<'_, commands::Data, commands::Error>,
+    _data: &commands::Data,
+) -> Result<(), commands::Error> {
+    if let serenity::FullEvent::VoiceStateUpdate { old: _, new } = event {
+        let guild_id = match new.guild_id {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+
+        let bot_id = ctx.cache.current_user().id;
+
+        let (bot_channel_id, users_in_channel) = {
+            let guild = match ctx.cache.guild(guild_id) {
+                Some(g) => g,
+                None => return Ok(()),
+            };
+
+            let channel_id = match guild.voice_states.get(&bot_id).and_then(|vs| vs.channel_id) {
+                Some(id) => id,
+                None => return Ok(()),
+            };
+
+            let users = guild
+                .voice_states
+                .values()
+                .filter(|vs| vs.channel_id == Some(channel_id))
+                .count();
+
+            (channel_id, users)
+        };
+
+        // If only 1 user inside channel (should be the bot)
+        if users_in_channel == 1 {
+            let ctx_clone = ctx.clone();
+
+            tokio::spawn(async move {
+                // Wait 5 minutes
+                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+
+                let should_disconnect = {
+                    if let Some(guild) = ctx_clone.cache.guild(guild_id) {
+                        let current_users = guild
+                            .voice_states
+                            .values()
+                            .filter(|vs| vs.channel_id == Some(bot_channel_id))
+                            .count();
+
+                        let bot_still_in_channel =
+                            guild.voice_states.get(&bot_id).and_then(|vs| vs.channel_id)
+                                == Some(bot_channel_id);
+
+                        bot_still_in_channel && current_users == 1
+                    } else {
+                        false
+                    }
+                };
+
+                // Disconnect if bot is the remaining user in a voice channel after 5 minutes
+                if should_disconnect {
+                    if let Some(manager) = songbird::get(&ctx_clone).await {
+                        let _ = manager.remove(guild_id).await;
+                        println!(
+                            "Left voice channel in guild {} due to 5 minutes of inactivity",
+                            guild_id
+                        );
+                    }
+                }
+            });
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -51,6 +127,9 @@ async fn main() {
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some(prefix),
                 ..Default::default()
+            },
+            event_handler: |ctx, event, framework, data| {
+                Box::pin(event_handler(ctx, event, framework, data))
             },
             ..Default::default()
         })
