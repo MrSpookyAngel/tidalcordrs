@@ -181,7 +181,7 @@ impl Session {
             .await?
             .error_for_status()?;
 
-        let login_response: LoginResponse = serde_json::from_str(&response.text().await?)?;
+        let login_response: LoginResponse = response.json().await?;
 
         println!(
             "Please visit: https://{}",
@@ -223,8 +223,7 @@ impl Session {
             match response {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        let token_response: TokenResponse =
-                            serde_json::from_str(&resp.text().await?)?;
+                        let token_response: TokenResponse = resp.json().await?;
 
                         self.access_token = token_response.access_token.clone();
                         self.refresh_token = token_response
@@ -279,7 +278,7 @@ impl Session {
         match response {
             Ok(resp) => {
                 if resp.status().is_success() {
-                    let token_response: TokenResponse = serde_json::from_str(&resp.text().await?)?;
+                    let token_response: TokenResponse = resp.json().await?;
 
                     self.access_token = token_response.access_token;
                     self.token_type = token_response.token_type;
@@ -321,7 +320,7 @@ impl Session {
             .await?;
 
         (self.session_id, self.country_code, self.user_id) = {
-            let session_response: SessionResponse = serde_json::from_str(&response.text().await?)?;
+            let session_response: SessionResponse = response.json().await?;
             (
                 session_response.session_id,
                 session_response.country_code,

@@ -8,6 +8,8 @@ use songbird::SerenityInit;
 
 #[tokio::main]
 async fn main() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Load environment variables from .env file if it exists
     dotenvy::dotenv_override().ok();
     let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
