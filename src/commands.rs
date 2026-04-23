@@ -289,7 +289,7 @@ pub async fn play(
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("pause"), guild_only)]
+#[poise::command(slash_command, prefix_command, aliases("pause", "wait"), guild_only)]
 pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
     // Get the guild ID
     let guild_id = match ctx.guild_id() {
@@ -320,7 +320,12 @@ pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("resume", "unpause"), guild_only)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("resume", "unpause", "continue"),
+    guild_only
+)]
 pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
     // Get the guild ID
     let guild_id = match ctx.guild_id() {
@@ -351,7 +356,12 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("skip", "s"), guild_only)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("skip", "s", "next"),
+    guild_only
+)]
 pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     // Get the guild ID
     let guild_id = match ctx.guild_id() {
@@ -474,17 +484,9 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     };
 
     // Get the songbird voice manager
-    let manager = songbird::get(ctx.serenity_context())
-        .await
-        .expect("Songbird voice manager not found")
-        .clone();
-
-    if let Some(handler_lock) = manager.get(guild_id) {
-        let mut handler = handler_lock.lock().await;
-
+    if let Some(manager) = songbird::get(&ctx.serenity_context()).await {
         // Leave the voice channel
-        let _ = handler.leave().await;
-
+        let _ = manager.remove(guild_id).await;
         println!("Left the voice channel. Guild ID: {}", guild_id);
     } else {
         ctx.say("Not connected to a voice channel.").await?;
