@@ -320,7 +320,7 @@ pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("resume, unpause"), guild_only)]
+#[poise::command(slash_command, prefix_command, aliases("resume", "unpause"), guild_only)]
 pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
     // Get the guild ID
     let guild_id = match ctx.guild_id() {
