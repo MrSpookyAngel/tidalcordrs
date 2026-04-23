@@ -123,6 +123,7 @@ async fn main() {
                 commands::stop(),
                 commands::current(),
                 commands::leave(),
+                commands::queue(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
                 prefix: Some(prefix),

@@ -494,3 +494,81 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
 
     Ok(())
 }
+
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("queue", "q", "list", "l"),
+    guild_only
+)]
+pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
+    // Get the guild ID
+    let guild_id = match ctx.guild_id() {
+        Some(guild_id) => guild_id,
+        None => {
+            ctx.say("This command can only be used in a guild.").await?;
+            return Ok(());
+        }
+    };
+
+    // Get the songbird voice manager
+    let manager = songbird::get(ctx.serenity_context())
+        .await
+        .expect("Songbird voice manager not found")
+        .clone();
+
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let handler = handler_lock.lock().await;
+
+        let queue = handler.queue().current_queue();
+
+        if queue.is_empty() {
+            ctx.say("The queue is currently empty.").await?;
+            return Ok(());
+        }
+
+        let mut message = String::new();
+
+        // Current track
+        if let Some(current) = queue.first() {
+            let track_data = current.data::<crate::track::Track>();
+            message.push_str(&format!(
+                "**Now Playing:**\n> {}\n\n",
+                get_formatted_track(&track_data)
+            ));
+        }
+
+        // Next {tracks_to_show} tracks
+        let tracks_to_show = 10;
+
+        if queue.len() > 1 {
+            message.push_str("**Up Next:**\n");
+
+            // Retrieve the next {tracks_to_show} number of tracks
+            for (i, track_handle) in queue.iter().skip(1).take(tracks_to_show).enumerate() {
+                let track_data = track_handle.data::<crate::track::Track>();
+                message.push_str(&format!(
+                    "{}. {}\n",
+                    i + 1,
+                    get_formatted_track(&track_data)
+                ));
+            }
+
+            // Show queue length if greater than {tracks_to_show} + 1 (current song)
+            if queue.len() > (tracks_to_show + 1) {
+                message.push_str(&format!(
+                    "\n*...and {} more tracks in the queue*",
+                    queue.len() - (tracks_to_show + 1)
+                ));
+            }
+        } else {
+            message.push_str("_No more tracks in the queue._");
+        }
+
+        ctx.say(message).await?;
+    } else {
+        ctx.say("Not connected to a voice channel.").await?;
+    }
+
+    Ok(())
+}
