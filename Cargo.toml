@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 dotenvy = "0.15.7"
+html-escape = "0.2.13"
+lol_html = "2.7.2"
 poise = "0.6.2"
 reqwest = { version = "0.13.2", features = ["form", "json", "query"] }
 rustls = { version = "0.23.38", features = ["ring"] }
@@ -14,3 +16,4 @@ serenity = { version = "0.12.5", features = ["cache", "client", "gateway", "rust
 songbird = { version = "0.6.0", features = ["builtin-queue"] }
 symphonia = "0.5.5"
 tokio = { version = "1.52.1", features = ["full"] }
+url = "2.5.8"

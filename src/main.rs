@@ -2,6 +2,7 @@ mod commands;
 mod session;
 mod storage;
 mod track;
+mod url_handler;
 
 use poise::serenity_prelude as serenity;
 use songbird::SerenityInit;

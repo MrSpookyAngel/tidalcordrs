@@ -1,3 +1,5 @@
+use songbird::tracks::PlayMode;
+
 pub struct Data {
     pub session: tokio::sync::Mutex<crate::session::Session>,
     pub storage: tokio::sync::Mutex<crate::storage::LRUStorage>,
@@ -63,36 +65,25 @@ pub async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-async fn try_join_voice_channel(ctx: Context<'_>) -> Result<(), Error> {
-    // Get the songbird voice manager
+async fn try_join_voice_channel(ctx: Context<'_>) -> Result<bool, Error> {
     let manager = songbird::get(ctx.serenity_context())
         .await
         .expect("Songbird voice manager not found");
 
-    // Get the guild ID
     let guild_id = match ctx.guild_id() {
         Some(guild_id) => guild_id,
         None => {
             ctx.say("This command can only be used in a guild.").await?;
-            return Ok(());
+            return Ok(false);
         }
     };
-
-    // Check if already connected to a voice channel
-    if manager.get(guild_id).is_some() {
-        println!(
-            "Already connected to a voice channel. Guild ID: {}",
-            guild_id
-        );
-        return Ok(());
-    }
 
     // Get the voice states from the guild
     let voice_states = if let Some(guild) = ctx.guild() {
         guild.voice_states.clone()
     } else {
         ctx.say("Voice states not available.").await?;
-        return Ok(());
+        return Ok(false);
     };
 
     // Get the current voice channel ID of the user
@@ -104,33 +95,38 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<(), Error> {
         None => {
             ctx.say("You must be in a voice channel to use this command.")
                 .await?;
-            return Ok(());
+            return Ok(false);
         }
     };
 
-    // Join the voice channel
+    // Check if the bot is already in the same channel
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let handler = handler_lock.lock().await;
+        if handler.current_channel() == Some(channel_id.into()) {
+            return Ok(true);
+        }
+    }
+
+    // Join (or move to) the voice channel
     if let Ok(handler_lock) = manager.join(guild_id, channel_id).await {
         let mut handler = handler_lock.lock().await;
         handler.add_global_event(
             songbird::events::TrackEvent::Error.into(),
             TrackErrorNotifier,
         );
-        println!(
-            "Joined the voice channel! Guild ID: {}, Channel ID: {}",
-            guild_id, channel_id
-        );
+        Ok(true)
     } else {
         ctx.say("Failed to join the voice channel.").await?;
-        return Ok(());
+        Ok(false)
     }
-
-    Ok(())
 }
 
 #[poise::command(slash_command, prefix_command, aliases("join", "j"), guild_only)]
 pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
     // Attempt to join the voice channel if not already connected
-    try_join_voice_channel(ctx).await
+    try_join_voice_channel(ctx).await?;
+
+    Ok(())
 }
 
 #[poise::command(slash_command, prefix_command, aliases("volume", "vol"), guild_only)]
@@ -208,42 +204,74 @@ pub async fn play(
     ctx: Context<'_>,
     #[description = "Provide the query or url of a song"]
     #[rest]
-    query_or_url: String,
+    query_or_url: Option<String>,
 ) -> Result<(), Error> {
     // Attempt to join the voice channel if not already connected
-    try_join_voice_channel(ctx.clone()).await?;
+    if !try_join_voice_channel(ctx.clone()).await? {
+        return Ok(());
+    }
 
-    let mut session = ctx.data().session.lock().await;
-
-    // Find tracks using the Tidal session
-    let tracks = session
-        .find_tracks(&query_or_url, 1)
-        .await
-        .map_err(|e| Error::from(e.to_string()))?;
-
-    // Get the first track from the search results
-    let first_track = match tracks.first() {
-        Some(track) => track,
-        None => {
-            ctx.say("No track was found.").await?;
-            return Ok(());
-        }
-    };
-
-    // Get the guild ID
-    let guild_id = match ctx.guild_id() {
-        Some(guild_id) => guild_id,
-        None => {
-            ctx.say("This command can only be used in a guild.").await?;
-            return Ok(());
-        }
-    };
-
-    // Get the songbird voice manager
+    let guild_id = ctx.guild_id().ok_or("Must be in a guild")?;
     let manager = songbird::get(ctx.serenity_context())
         .await
         .expect("Songbird voice manager not found")
         .clone();
+
+    if query_or_url.is_none() {
+        if let Some(handler_lock) = manager.get(guild_id) {
+            let handler = handler_lock.lock().await;
+            let current = handler.queue().current();
+            if let Some(track_handle) = current {
+                let track_info = track_handle.get_info().await?;
+                match track_info.playing {
+                    PlayMode::Pause => {
+                        if handler.queue().resume().is_ok() {
+                            ctx.say("Resumed the playback.").await?;
+                        } else {
+                            ctx.say("Failed to resume the playback.").await?;
+                        }
+                    }
+                    PlayMode::Play => {
+                        ctx.say("Track already playing.").await?;
+                    }
+                    _ => {
+                        // Do nothing
+                    }
+                }
+            }
+        } else {
+            // Probably shouldn't happen since the bot would join in try_join_voice_channel
+            ctx.say("I'm not in a voice channel.").await?;
+        }
+        return Ok(());
+    }
+
+    let query = query_or_url.unwrap();
+
+    try_join_voice_channel(ctx.clone()).await?;
+
+    let mut session = ctx.data().session.lock().await;
+
+    let resolved_track = crate::url_handler::handle_url(&mut *session, &query).await?;
+
+    let first_track = match resolved_track {
+        Some(t) => t,
+        None => {
+            let mut tracks = session
+                .find_tracks(&query, 1)
+                .await
+                .map_err(|e| Error::from(e.to_string()))?;
+
+            match tracks.pop() {
+                Some(t) => t,
+                None => {
+                    ctx.say("No track was found on Tidal.").await?;
+                    return Ok(());
+                }
+            }
+        }
+    };
+    drop(session);
 
     if let Some(handler_lock) = manager.get(guild_id) {
         let mut handler = handler_lock.lock().await;
@@ -278,7 +306,7 @@ pub async fn play(
         ctx.say(format!(
             "{} added **{}** to the queue.",
             ctx.author().name,
-            get_formatted_track(first_track)
+            get_formatted_track(&first_track)
         ))
         .await?;
     } else {
@@ -344,13 +372,27 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
 
     if let Some(handler_lock) = manager.get(guild_id) {
         let handler = handler_lock.lock().await;
-
-        // Resume the playback
-        let _ = handler.queue().resume();
-
-        ctx.say("Resumed the playback.").await?;
+        let current = handler.queue().current();
+        if let Some(track_handle) = current {
+            let track_info = track_handle.get_info().await?;
+            match track_info.playing {
+                PlayMode::Pause => {
+                    if handler.queue().resume().is_ok() {
+                        ctx.say("Resumed the playback.").await?;
+                    } else {
+                        ctx.say("Failed to resume the playback.").await?;
+                    }
+                }
+                PlayMode::Play => {
+                    ctx.say("Track already playing.").await?;
+                }
+                _ => {
+                    // Do nothing
+                }
+            }
+        }
     } else {
-        ctx.say("Not connected to a voice channel.").await?;
+        ctx.say("I'm not in a voice channel.").await?;
     }
 
     Ok(())
@@ -381,10 +423,13 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     if let Some(handler_lock) = manager.get(guild_id) {
         let handler = handler_lock.lock().await;
 
-        // Skip the current track
-        let _ = handler.queue().skip();
-
-        ctx.say("Skipped the current track.").await?;
+        if let Some(_) = handler.queue().current() {
+            // Skip the current song
+            let _ = handler.queue().skip();
+            ctx.say("Skipped the current track.").await?;
+        } else {
+            ctx.say("No track in the queue.").await?;
+        }
     } else {
         ctx.say("Not connected to a voice channel.").await?;
     }

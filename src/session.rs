@@ -459,4 +459,24 @@ impl Session {
 
         Ok(tracks)
     }
+
+    pub async fn find_track_by_details(
+        &mut self,
+        title: &str,
+        artist: &str,
+        album: &str,
+    ) -> Result<Option<track::Track>, Error> {
+        // No album included in first search because sometimes album name is a song name that is more popular than the title
+        let short_query = format!("{} {}", artist, title);
+        let mut short_tracks = self.find_tracks(&short_query, 1).await?;
+
+        if !short_tracks.is_empty() {
+            return Ok(short_tracks.pop());
+        }
+
+        let full_query = format!("{} {} {}", artist, title, album);
+        let mut tracks = self.find_tracks(&full_query, 1).await?;
+
+        Ok(tracks.pop())
+    }
 }
