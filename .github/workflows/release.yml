@@ -2,12 +2,47 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
 
 jobs:
+  check-version:
+    name: Check Version
+    runs-on: ubuntu-latest
+    outputs:
+      is_new: ${{ steps.check.outputs.is_new }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check version bump
+        id: check
+        run: |
+          # Extract version from Cargo.toml
+          VERSION=$(grep '^version' Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
+          TAG_NAME="v$VERSION"
+          
+          echo "Found version: $VERSION"
+          
+          # Check if a tag for this version already exists
+          if git show-ref --tags --verify --quiet "refs/tags/$TAG_NAME"; then
+            echo "Tag $TAG_NAME already exists. Skipping release."
+            echo "is_new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag $TAG_NAME does not exist. Proceeding with release."
+            echo "is_new=true" >> "$GITHUB_OUTPUT"
+            echo "version=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build on ${{ matrix.os }}
+    needs: check-version
+    if: needs.check-version.outputs.is_new == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -41,7 +76,7 @@ jobs:
             osname="linux"
           fi
 
-          version="${{ github.ref_name }}"
+          version="${{ needs.check-version.outputs.version }}"
 
           if [ "$osname" = "windows" ]; then
             for f in target/release/*.exe; do
@@ -64,7 +99,8 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [check-version, build]
+    if: needs.check-version.outputs.is_new == 'true'
     runs-on: ubuntu-latest
 
     permissions:
@@ -79,6 +115,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/* 
+          tag_name: ${{ needs.check-version.outputs.version }}
+          name: Release ${{ needs.check-version.outputs.version }}
+          files: artifacts/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
