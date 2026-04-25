@@ -98,6 +98,7 @@ async fn main() {
         .expect("Expected a max size in the environment")
         .parse()
         .expect("Failed to parse STORAGE_MAX_SIZE_BYTES");
+    let version = env!("CARGO_PKG_VERSION");
 
     let storage = storage::LRUStorage::new(&storage_dir, storage_max_size);
 
@@ -135,9 +136,9 @@ async fn main() {
             },
             ..Default::default()
         })
-        .setup(|_ctx, ready, _framework| {
+        .setup(move |_ctx, ready, _framework| {
             Box::pin(async move {
-                println!("{} is connected!", ready.user.name);
+                println!("{} is connected! (v{})", ready.user.name, version);
                 Ok(commands::Data {
                     session: tokio::sync::Mutex::new(tidal_session),
                     storage: tokio::sync::Mutex::new(storage),
