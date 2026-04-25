@@ -4,6 +4,9 @@ use html_escape::decode_html_entities;
 use lol_html::{HtmlRewriter, Settings, element, text};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::OnceLock;
+static RE: OnceLock<regex::Regex> = OnceLock::new();
+static FEAT_RE: OnceLock<regex::Regex> = OnceLock::new();
 
 #[derive(Debug)]
 pub struct YouTubeMetadata {
@@ -26,6 +29,7 @@ pub async fn handle_url(
             if youtube_domains.iter().any(|&d| domain.contains(d)) {
                 println!("Detected YouTube URL. Extracting metadata...");
                 let metadata = extract_youtube_metadata(input).await?;
+                println!("{:?}", metadata);
                 session
                     .find_track_by_details(&metadata.title, &metadata.artist, &metadata.album)
                     .await
@@ -49,7 +53,7 @@ pub async fn handle_url(
 
 async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
     let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .user_agent("Mozilla/5.0 (X11; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0")
         .build()
         .map_err(|e| Error::from(e.to_string()))?;
 
@@ -104,43 +108,81 @@ async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
     let data: serde_json::Value =
         serde_json::from_str(&raw_json).map_err(|e| Error::from(e.to_string()))?;
 
-    // 1. Attempt to get track details inside description
+    let re = RE.get_or_init(|| regex::Regex::new(r"\s*[\[\(].*?[\]\)]").unwrap());
+    let feat_re =
+        FEAT_RE.get_or_init(|| regex::Regex::new(r"(?i)\b(feat|ft|featuring)\b.*").unwrap());
+
+    // Remove brackets, remove feat, trim, lowercase
+    let clean = |s: &str| -> String {
+        let no_brackets = re.replace_all(s, "");
+        let no_feat = feat_re.replace_all(&no_brackets, "");
+        no_feat.trim().to_lowercase()
+    };
+
+    // 1. Attempt to get track details if in "Artist - Song" format
+    let video_details = data.pointer(
+        "/playerOverlays/playerOverlayRenderer/videoDetails/playerOverlayVideoDetailsRenderer",
+    );
+
+    if let Some(v) = video_details {
+        let raw_video_title = v
+            .pointer("/title/simpleText")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+
+        let clean_video_title = clean(raw_video_title);
+
+        let separators = [" - ", " – ", " — ", " : "];
+        for sep in separators {
+            if clean_video_title.contains(sep) {
+                let parts: Vec<&str> = clean_video_title.splitn(2, sep).collect();
+                if parts.len() == 2 {
+                    return Ok(YouTubeMetadata {
+                        artist: parts[0].trim().to_string(),
+                        title: parts[1].trim().to_string(),
+                        album: "".to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // 2. Attempt to get track details inside description
     if let Some(panels) = data.get("engagementPanels").and_then(|v| v.as_array()) {
         for panel in panels {
             let model = panel.pointer("/engagementPanelSectionListRenderer/content/structuredDescriptionContentRenderer/items/2/horizontalCardListRenderer/cards/0/videoAttributeViewModel");
 
             if let Some(m) = model {
-                return Ok(YouTubeMetadata {
-                    title: m
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_lowercase(),
-                    artist: m
-                        .get("subtitle")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_lowercase(),
-                    album: m
-                        .pointer("/secondarySubtitle/content")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_lowercase(),
-                });
+                let raw_title = m.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let artist = m
+                    .get("subtitle")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+
+                let title = clean(raw_title);
+
+                if !title.is_empty() && !artist.is_empty() {
+                    return Ok(YouTubeMetadata {
+                        title,
+                        artist,
+                        album: m
+                            .pointer("/secondarySubtitle/content")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_lowercase(),
+                    });
+                }
             }
         }
     }
 
-    // 2. Fallback to uploader and video title
-    let video_details = data.pointer(
-        "/playerOverlays/playerOverlayRenderer/videoDetails/playerOverlayVideoDetailsRenderer",
-    );
+    // 3. Fallback to uploader and video title
     if let Some(v) = video_details {
-        let title = v
+        let raw_title = v
             .pointer("/title/simpleText")
             .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_lowercase();
+            .unwrap_or("");
         let uploader = v
             .pointer("/subtitle/runs/0/text")
             .and_then(|t| t.as_str())
@@ -148,7 +190,7 @@ async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
             .to_lowercase();
 
         return Ok(YouTubeMetadata {
-            title,
+            title: clean(raw_title),
             artist: uploader,
             album: "".to_string(),
         });
