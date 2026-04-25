@@ -29,7 +29,6 @@ pub async fn handle_url(
             if youtube_domains.iter().any(|&d| domain.contains(d)) {
                 println!("Detected YouTube URL. Extracting metadata...");
                 let metadata = extract_youtube_metadata(input).await?;
-                println!("{:?}", metadata);
                 session
                     .find_track_by_details(&metadata.title, &metadata.artist, &metadata.album)
                     .await
