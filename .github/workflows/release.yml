@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - 'Cargo.toml'
+      - "Cargo.toml"
 
 jobs:
   check-version:
@@ -26,9 +26,9 @@ jobs:
           # Extract version from Cargo.toml
           VERSION=$(grep '^version' Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
           TAG_NAME="v$VERSION"
-          
+
           echo "Found version: $VERSION"
-          
+
           # Check if a tag for this version already exists
           if git show-ref --tags --verify --quiet "refs/tags/$TAG_NAME"; then
             echo "Tag $TAG_NAME already exists. Skipping release."
@@ -120,3 +120,37 @@ jobs:
           files: artifacts/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  docker:
+    name: Build and Push Docker Image
+    needs: [check-version, release]
+    if: needs.check-version.outputs.is_new == 'true'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set lowercase repo name
+        run: |
+          echo "repo_lowercase=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ env.repo_lowercase }}:latest
+            ghcr.io/${{ env.repo_lowercase }}:${{ needs.check-version.outputs.version }}
