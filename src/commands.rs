@@ -2,87 +2,10 @@ use songbird::tracks::PlayMode;
 
 pub struct Data {
     pub session: tokio::sync::Mutex<crate::session::Session>,
+    pub spool_read_ahead_bytes: u64,
 }
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
-
-struct FfmpegStream {
-    url: String,
-}
-
-impl FfmpegStream {
-    fn new(url: &str) -> Self {
-        Self {
-            url: url.to_string(),
-        }
-    }
-
-    fn spawn(&self) -> Result<std::process::Child, songbird::input::AudioStreamError> {
-        let child = std::process::Command::new("ffmpeg")
-            .args([
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-reconnect",
-                "1",
-                "-reconnect_streamed",
-                "1",
-                "-reconnect_delay_max",
-                "5",
-                "-i",
-                &self.url,
-                "-vn",
-                "-c:a",
-                "libopus",
-                "-f",
-                "opus",
-                "pipe:1",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .map_err(|error| songbird::input::AudioStreamError::Fail(Box::new(error)))?;
-
-        if child.stdout.is_none() {
-            return Err(songbird::input::AudioStreamError::Fail(
-                "ffmpeg stdout was not piped".into(),
-            ));
-        }
-
-        Ok(child)
-    }
-}
-
-#[serenity::async_trait]
-impl songbird::input::Compose for FfmpegStream {
-    fn create(
-        &mut self,
-    ) -> Result<
-        songbird::input::AudioStream<Box<dyn songbird::input::core::io::MediaSource>>,
-        songbird::input::AudioStreamError,
-    > {
-        let child = self.spawn()?;
-        let input = songbird::input::ChildContainer::from(child);
-        Ok(songbird::input::AudioStream {
-            input: Box::new(songbird::input::core::io::ReadOnlySource::new(input))
-                as Box<dyn songbird::input::core::io::MediaSource>,
-        })
-    }
-
-    async fn create_async(
-        &mut self,
-    ) -> Result<
-        songbird::input::AudioStream<Box<dyn songbird::input::core::io::MediaSource>>,
-        songbird::input::AudioStreamError,
-    > {
-        self.create()
-    }
-
-    fn should_create_async(&self) -> bool {
-        false
-    }
-}
 
 struct TrackErrorNotifier;
 
@@ -240,10 +163,14 @@ pub async fn volume(ctx: Context<'_>, volume: u8) -> Result<(), Error> {
 }
 
 async fn enqueue_track(
+    ctx: &Context<'_>,
     handler: &mut songbird::Call,
     track: &crate::track::Track,
 ) -> Result<(), Error> {
-    let stream = songbird::input::Input::Lazy(Box::new(FfmpegStream::new(&track.stream_url)));
+    let stream = songbird::input::Input::Lazy(Box::new(crate::ffmpeg_spool::FfmpegStream::new(
+        &track.stream_url,
+        ctx.data().spool_read_ahead_bytes,
+    )));
     let data = std::sync::Arc::new(track.clone());
     let songbird_track = songbird::tracks::Track::new_with_data(stream, data);
 
@@ -330,7 +257,7 @@ pub async fn play(
         let mut handler = handler_lock.lock().await;
 
         for track in &tracks {
-            enqueue_track(&mut handler, track).await?;
+            enqueue_track(&ctx, &mut handler, track).await?;
         }
 
         if tracks.len() == 1 {

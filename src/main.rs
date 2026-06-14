@@ -1,4 +1,5 @@
 mod commands;
+mod ffmpeg_spool;
 mod session;
 mod track;
 mod url_handler;
@@ -91,6 +92,12 @@ async fn main() {
     let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
     let prefix =
         std::env::var("COMMAND_PREFIX").expect("Expected a command prefix in the environment");
+    let spool_read_ahead_bytes = std::env::var("SPOOL_READ_AHEAD_MIB")
+        .unwrap_or_else(|_| "16".to_string())
+        .parse::<u64>()
+        .expect("Failed to parse SPOOL_READ_AHEAD_MIB")
+        .checked_mul(1024 * 1024)
+        .expect("SPOOL_READ_AHEAD_MIB is too large");
     let version = env!("CARGO_PKG_VERSION");
 
     // Initialize the Tidal session
@@ -132,6 +139,7 @@ async fn main() {
                 println!("{} is connected! (v{})", ready.user.name, version);
                 Ok(commands::Data {
                     session: tokio::sync::Mutex::new(tidal_session),
+                    spool_read_ahead_bytes,
                 })
             })
         })

@@ -11,6 +11,7 @@ services:
 
       # Configuration (change these as needed)
       COMMAND_PREFIX: "!"
+      SPOOL_READ_AHEAD_MIB: "16"
       TIDAL_TOKEN_SESSION_PATH: "data/tidal_token.json"
 
       # Requests Configuration (probably don't change these)
