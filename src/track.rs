@@ -1,3 +1,5 @@
+use crate::commands::Error;
+
 #[derive(Debug, Clone)]
 pub struct Track {
     pub id: String,
@@ -13,10 +15,16 @@ impl Track {
     pub async fn from_track_id(
         session: &crate::session::Session,
         track_response: &serde_json::Value,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        let track_id = track_response["id"]
+            .as_u64()
+            .map(|id| id.to_string())
+            .or_else(|| track_response["id"].as_str().map(String::from))
+            .ok_or("Expected track id")?;
+
         let url = format!(
             "https://api.tidal.com/v1/tracks/{}/urlpostpaywall",
-            track_response["id"]
+            track_id
         );
 
         let params = [
@@ -32,29 +40,30 @@ impl Track {
             .get(&url)
             .query(&params)
             .send()
-            .await
-            .expect("Failed to send request");
+            .await?
+            .error_for_status()?;
 
-        let json = response
-            .json::<serde_json::Value>()
-            .await
-            .expect("Failed to parse JSON");
+        let json = response.json::<serde_json::Value>().await?;
 
-        let id = format!("{}", json["trackId"]).to_string();
+        let id = json["trackId"]
+            .as_u64()
+            .map(|id| id.to_string())
+            .or_else(|| json["trackId"].as_str().map(String::from))
+            .unwrap_or(track_id);
 
         let title = track_response["title"]
             .as_str()
-            .expect("Expected title")
+            .ok_or("Expected title")?
             .to_string();
 
         let artist = track_response["artists"][0]["name"]
             .as_str()
-            .expect("Expected artist name")
+            .ok_or("Expected artist name")?
             .to_string();
 
         let featured_artists = track_response["artists"]
             .as_array()
-            .expect("Expected artists array")
+            .ok_or("Expected artists array")?
             .iter()
             .skip(1) // Skip main artist
             .filter_map(|artist| artist["name"].as_str().map(String::from))
@@ -62,21 +71,20 @@ impl Track {
 
         let album = track_response["album"]["title"]
             .as_str()
-            .expect("Expected album title")
+            .unwrap_or("")
             .to_string();
 
         let duration = track_response["duration"]
             .as_u64()
-            .expect("Expected duration")
-            .try_into()
-            .expect("Duration overflow");
+            .ok_or("Expected duration")?
+            .try_into()?;
 
         let stream_url = json["urls"][0]
             .as_str()
-            .expect("Expected stream URL")
+            .ok_or("Expected stream URL")?
             .to_string();
 
-        Track {
+        Ok(Track {
             id,
             title,
             artist,
@@ -84,6 +92,6 @@ impl Track {
             album,
             duration,
             stream_url,
-        }
+        })
     }
 }

@@ -18,7 +18,7 @@ pub struct YouTubeMetadata {
 pub async fn handle_url(
     session: &mut crate::session::Session,
     input: &str,
-) -> Result<Option<Track>, Error> {
+) -> Result<Vec<Track>, Error> {
     let parsed_url = url::Url::parse(input);
 
     match parsed_url {
@@ -29,25 +29,66 @@ pub async fn handle_url(
             if youtube_domains.iter().any(|&d| domain.contains(d)) {
                 println!("Detected YouTube URL. Extracting metadata...");
                 let metadata = extract_youtube_metadata(input).await?;
-                session
+                Ok(session
                     .find_track_by_details(&metadata.title, &metadata.artist, &metadata.album)
-                    .await
+                    .await?
+                    .into_iter()
+                    .collect())
             } else if domain.contains("tidal.com") {
-                println!("Detected Tidal URL. Fetching track...");
-                match extract_tidal_info(input).await? {
-                    Some(search) => {
-                        let mut tracks = session.find_tracks(&search, 1).await?;
-                        Ok(tracks.pop())
+                println!("Detected Tidal URL. Resolving...");
+                match parse_tidal_resource(&url) {
+                    Some((TidalResource::Track, id)) => {
+                        Ok(vec![session.find_track_by_id(&id).await?])
                     }
-                    _ => Ok(None),
+                    Some((TidalResource::Playlist, id)) => {
+                        session.find_collection_tracks("playlists", &id).await
+                    }
+                    Some((TidalResource::Album, id)) => {
+                        session.find_collection_tracks("albums", &id).await
+                    }
+                    None => match extract_tidal_info(input).await? {
+                        Some(search) => session.find_tracks(&search, 1).await,
+                        _ => Ok(Vec::new()),
+                    },
                 }
             } else {
                 println!("Unsupported host: {:?}", url);
-                Ok(None)
+                Ok(Vec::new())
             }
         }
-        Err(_) => Ok(None),
+        Err(_) => Ok(Vec::new()),
     }
+}
+
+enum TidalResource {
+    Track,
+    Playlist,
+    Album,
+}
+
+fn parse_tidal_resource(url: &url::Url) -> Option<(TidalResource, String)> {
+    let segments = url.path_segments()?.collect::<Vec<_>>();
+
+    for resource_name in ["track", "playlist", "album"] {
+        if let Some(index) = segments
+            .iter()
+            .position(|segment| *segment == resource_name)
+        {
+            let resource = match resource_name {
+                "track" => TidalResource::Track,
+                "playlist" => TidalResource::Playlist,
+                "album" => TidalResource::Album,
+                _ => unreachable!(),
+            };
+
+            let id = segments.get(index + 1)?;
+            if !id.is_empty() {
+                return Some((resource, (*id).to_string()));
+            }
+        };
+    }
+
+    None
 }
 
 async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {

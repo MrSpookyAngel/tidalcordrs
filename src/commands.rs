@@ -199,6 +199,36 @@ async fn download_to_bytes(url: &str) -> Result<Vec<u8>, std::io::Error> {
     Ok(output.stdout)
 }
 
+async fn enqueue_track(
+    ctx: &Context<'_>,
+    handler: &mut songbird::Call,
+    track: &crate::track::Track,
+) -> Result<(), Error> {
+    let storage = ctx.data().storage.lock().await;
+    let file_name = format!("{}.opus", track.id);
+    let file_path = match storage.exists(&file_name).await {
+        true => {
+            println!("Track already exists in storage: {}", file_name);
+            storage.storage_dir.join(file_name)
+        }
+        false => {
+            let file_bytes = download_to_bytes(&track.stream_url).await?;
+            let file_path = storage.storage_dir.join(&file_name);
+            storage.insert(file_name, file_bytes).await?;
+            file_path
+        }
+    };
+    drop(storage);
+
+    let stream = songbird::input::File::new(file_path);
+    let data = std::sync::Arc::new(track.clone());
+    let songbird_track = songbird::tracks::Track::new_with_data(stream.into(), data);
+
+    let _ = handler.enqueue(songbird_track).await;
+
+    Ok(())
+}
+
 #[poise::command(slash_command, prefix_command, aliases("play", "p"), guild_only)]
 pub async fn play(
     ctx: Context<'_>,
@@ -248,67 +278,53 @@ pub async fn play(
 
     let query = query_or_url.unwrap();
 
+    let _ = ctx.defer().await;
+
     try_join_voice_channel(ctx.clone()).await?;
 
     let mut session = ctx.data().session.lock().await;
 
-    let resolved_track = crate::url_handler::handle_url(&mut *session, &query).await?;
+    let mut tracks = crate::url_handler::handle_url(&mut *session, &query).await?;
 
-    let first_track = match resolved_track {
-        Some(t) => t,
-        None => {
-            let mut tracks = session
+    if tracks.is_empty() {
+        tracks = {
+            let tracks = session
                 .find_tracks(&query, 1)
                 .await
                 .map_err(|e| Error::from(e.to_string()))?;
 
-            match tracks.pop() {
-                Some(t) => t,
-                None => {
-                    ctx.say("No track was found on Tidal.").await?;
-                    return Ok(());
-                }
+            if tracks.is_empty() {
+                ctx.say("No track was found on Tidal.").await?;
+                return Ok(());
             }
-        }
-    };
+
+            tracks
+        };
+    }
     drop(session);
 
     if let Some(handler_lock) = manager.get(guild_id) {
         let mut handler = handler_lock.lock().await;
 
-        // Get the file path for the track (and if needed, download it)
-        let storage = ctx.data().storage.lock().await;
-        let file_name = format!("{}.opus", first_track.id);
-        let file_path = match storage.exists(&file_name).await {
-            true => {
-                // If the track already exists in the storage, use it
-                println!("Track already exists in storage: {}", file_name);
-                storage.storage_dir.join(file_name)
-            }
-            false => {
-                // Download the track to the storage directory
-                let file_bytes = download_to_bytes(&first_track.stream_url).await?;
-                let file_path = storage.storage_dir.join(&file_name);
-                storage.insert(file_name, file_bytes).await?;
-                file_path
-            }
-        };
-        drop(storage); // Release the lock
+        for track in &tracks {
+            enqueue_track(&ctx, &mut handler, track).await?;
+        }
 
-        // Create a songbird stream from the downloaded file
-        let stream = songbird::input::File::new(file_path);
-        let data = std::sync::Arc::new(first_track.clone());
-        let track = songbird::tracks::Track::new_with_data(stream.into(), data);
-
-        // Add the track to the queue
-        let _ = handler.enqueue(track).await;
-
-        ctx.say(format!(
-            "{} added **{}** to the queue.",
-            ctx.author().name,
-            get_formatted_track(&first_track)
-        ))
-        .await?;
+        if tracks.len() == 1 {
+            ctx.say(format!(
+                "{} added **{}** to the queue.",
+                ctx.author().name,
+                get_formatted_track(&tracks[0])
+            ))
+            .await?;
+        } else {
+            ctx.say(format!(
+                "{} added **{} tracks** to the queue.",
+                ctx.author().name,
+                tracks.len()
+            ))
+            .await?;
+        }
     } else {
         ctx.say("Not connected to a voice channel.").await?;
         return Ok(());

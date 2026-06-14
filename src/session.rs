@@ -418,6 +418,247 @@ impl Session {
         }
     }
 
+    async fn get_track_response(&self, track_id: &str) -> Result<serde_json::Value, Error> {
+        let url = format!("https://api.tidal.com/v1/tracks/{}", track_id);
+        let params = [
+            ("sessionId", self.session_id.as_str()),
+            ("countryCode", self.country_code.as_str()),
+        ];
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("User-Agent", self.config.user_agent.parse()?);
+        headers.insert(
+            "Authorization",
+            format!("{} {}", self.token_type, self.access_token).parse()?,
+        );
+        headers.insert("Accept", "application/json".parse()?);
+
+        let response = self
+            .client
+            .get(&url)
+            .headers(headers)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
+    pub async fn find_track_by_id(&mut self, track_id: &str) -> Result<track::Track, Error> {
+        let mut track_response = self.get_track_response(track_id).await;
+
+        if track_response.is_err() {
+            self.refresh_token().await?;
+            track_response = self.get_track_response(track_id).await;
+        }
+
+        track::Track::from_track_id(self, &track_response?).await
+    }
+
+    async fn collection_track_ids(
+        &self,
+        collection_type: &str,
+        collection_id: &str,
+    ) -> Result<Vec<String>, Error> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("User-Agent", self.config.user_agent.parse()?);
+        headers.insert(
+            "Authorization",
+            format!("{} {}", self.token_type, self.access_token).parse()?,
+        );
+        headers.insert("Accept", "application/vnd.api+json".parse()?);
+
+        let mut next_url = Some(format!(
+            "https://openapi.tidal.com/v2/{}/{}/relationships/items?countryCode={}",
+            collection_type, collection_id, self.country_code
+        ));
+        let mut track_ids = Vec::new();
+
+        while let Some(url) = next_url.take() {
+            let response = self
+                .client
+                .get(&url)
+                .headers(headers.clone())
+                .send()
+                .await?
+                .error_for_status()?;
+            let json = response.json::<serde_json::Value>().await?;
+
+            if let Some(items) = json.get("data").and_then(|value| value.as_array()) {
+                track_ids.extend(items.iter().filter_map(|item| {
+                    if item.get("type").and_then(|value| value.as_str()) == Some("tracks") {
+                        item.get("id")
+                            .and_then(|value| value.as_str())
+                            .map(String::from)
+                    } else {
+                        None
+                    }
+                }));
+            }
+
+            next_url = json
+                .pointer("/links/next")
+                .and_then(|value| value.as_str())
+                .filter(|link| !link.is_empty())
+                .map(|link| {
+                    if link.starts_with("http") {
+                        link.to_string()
+                    } else {
+                        format!("https://openapi.tidal.com/v2{}", link)
+                    }
+                });
+        }
+
+        Ok(track_ids)
+    }
+
+    async fn legacy_collection_tracks_page(
+        &self,
+        collection_type: &str,
+        collection_id: &str,
+        limit: u32,
+        offset: u32,
+    ) -> Result<serde_json::Value, Error> {
+        let url = format!(
+            "https://api.tidal.com/v1/{}/{}/tracks",
+            collection_type, collection_id
+        );
+        let limit = limit.to_string();
+        let offset = offset.to_string();
+        let params = [
+            ("sessionId", self.session_id.as_str()),
+            ("countryCode", self.country_code.as_str()),
+            ("limit", limit.as_str()),
+            ("offset", offset.as_str()),
+        ];
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("User-Agent", self.config.user_agent.parse()?);
+        headers.insert(
+            "Authorization",
+            format!("{} {}", self.token_type, self.access_token).parse()?,
+        );
+        headers.insert("Accept", "application/json".parse()?);
+
+        let response = self
+            .client
+            .get(&url)
+            .headers(headers)
+            .query(&params)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
+    async fn legacy_collection_tracks(
+        &mut self,
+        collection_type: &str,
+        collection_id: &str,
+    ) -> Result<Vec<track::Track>, Error> {
+        let mut tracks = Vec::new();
+        let limit = 100;
+        let mut offset = 0;
+
+        loop {
+            let mut page = self
+                .legacy_collection_tracks_page(collection_type, collection_id, limit, offset)
+                .await;
+
+            if page.is_err() {
+                self.refresh_token().await?;
+                page = self
+                    .legacy_collection_tracks_page(collection_type, collection_id, limit, offset)
+                    .await;
+            }
+
+            let page = page?;
+            let items = page
+                .get("items")
+                .and_then(|value| value.as_array())
+                .ok_or("No items found in collection")?;
+
+            if items.is_empty() {
+                break;
+            }
+
+            for item in items {
+                let track_response = item.get("item").unwrap_or(item);
+                if track_response
+                    .get("type")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|item_type| item_type.eq_ignore_ascii_case("video"))
+                {
+                    continue;
+                }
+
+                match track::Track::from_track_id(self, track_response).await {
+                    Ok(track) => tracks.push(track),
+                    Err(error) => {
+                        println!("Skipping collection track: {}", error);
+                    }
+                }
+            }
+
+            offset += items.len() as u32;
+
+            let total = page
+                .get("totalNumberOfItems")
+                .or_else(|| page.get("total"))
+                .and_then(|value| value.as_u64());
+
+            if items.len() < limit as usize || total.is_some_and(|total| offset as u64 >= total) {
+                break;
+            }
+        }
+
+        Ok(tracks)
+    }
+
+    pub async fn find_collection_tracks(
+        &mut self,
+        collection_type: &str,
+        collection_id: &str,
+    ) -> Result<Vec<track::Track>, Error> {
+        let mut ids = self
+            .collection_track_ids(collection_type, collection_id)
+            .await;
+
+        if ids.is_err() {
+            self.refresh_token().await?;
+            ids = self
+                .collection_track_ids(collection_type, collection_id)
+                .await;
+        }
+
+        match ids {
+            Ok(ids) => {
+                let mut tracks = Vec::with_capacity(ids.len());
+
+                for id in ids {
+                    match self.find_track_by_id(&id).await {
+                        Ok(track) => tracks.push(track),
+                        Err(error) => {
+                            println!("Skipping collection track {}: {}", id, error);
+                        }
+                    }
+                }
+
+                Ok(tracks)
+            }
+            Err(error) => {
+                println!(
+                    "Falling back to legacy collection endpoint for {} {}: {}",
+                    collection_type, collection_id, error
+                );
+                self.legacy_collection_tracks(collection_type, collection_id)
+                    .await
+            }
+        }
+    }
+
     pub async fn find_tracks(
         &mut self,
         query: &str,
@@ -453,7 +694,7 @@ impl Session {
         let mut tracks = Vec::with_capacity(items.len());
 
         for item in items {
-            let track = track::Track::from_track_id(self, item).await;
+            let track = track::Track::from_track_id(self, item).await?;
             tracks.push(track);
         }
 
