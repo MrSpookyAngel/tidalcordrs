@@ -1,6 +1,5 @@
 mod commands;
 mod session;
-mod storage;
 mod track;
 mod url_handler;
 
@@ -92,15 +91,7 @@ async fn main() {
     let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
     let prefix =
         std::env::var("COMMAND_PREFIX").expect("Expected a command prefix in the environment");
-    let storage_dir =
-        std::env::var("STORAGE_DIR").expect("Expected a storage directory in the environment");
-    let storage_max_size = std::env::var("STORAGE_MAX_SIZE_BYTES")
-        .expect("Expected a max size in the environment")
-        .parse()
-        .expect("Failed to parse STORAGE_MAX_SIZE_BYTES");
     let version = env!("CARGO_PKG_VERSION");
-
-    let storage = storage::LRUStorage::new(&storage_dir, storage_max_size);
 
     // Initialize the Tidal session
     let tidal_session = session::Session::new().await;
@@ -141,7 +132,6 @@ async fn main() {
                 println!("{} is connected! (v{})", ready.user.name, version);
                 Ok(commands::Data {
                     session: tokio::sync::Mutex::new(tidal_session),
-                    storage: tokio::sync::Mutex::new(storage),
                 })
             })
         })

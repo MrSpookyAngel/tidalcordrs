@@ -2,10 +2,87 @@ use songbird::tracks::PlayMode;
 
 pub struct Data {
     pub session: tokio::sync::Mutex<crate::session::Session>,
-    pub storage: tokio::sync::Mutex<crate::storage::LRUStorage>,
 }
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
+
+struct FfmpegStream {
+    url: String,
+}
+
+impl FfmpegStream {
+    fn new(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+        }
+    }
+
+    fn spawn(&self) -> Result<std::process::Child, songbird::input::AudioStreamError> {
+        let child = std::process::Command::new("ffmpeg")
+            .args([
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-reconnect",
+                "1",
+                "-reconnect_streamed",
+                "1",
+                "-reconnect_delay_max",
+                "5",
+                "-i",
+                &self.url,
+                "-vn",
+                "-c:a",
+                "libopus",
+                "-f",
+                "opus",
+                "pipe:1",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|error| songbird::input::AudioStreamError::Fail(Box::new(error)))?;
+
+        if child.stdout.is_none() {
+            return Err(songbird::input::AudioStreamError::Fail(
+                "ffmpeg stdout was not piped".into(),
+            ));
+        }
+
+        Ok(child)
+    }
+}
+
+#[serenity::async_trait]
+impl songbird::input::Compose for FfmpegStream {
+    fn create(
+        &mut self,
+    ) -> Result<
+        songbird::input::AudioStream<Box<dyn songbird::input::core::io::MediaSource>>,
+        songbird::input::AudioStreamError,
+    > {
+        let child = self.spawn()?;
+        let input = songbird::input::ChildContainer::from(child);
+        Ok(songbird::input::AudioStream {
+            input: Box::new(songbird::input::core::io::ReadOnlySource::new(input))
+                as Box<dyn songbird::input::core::io::MediaSource>,
+        })
+    }
+
+    async fn create_async(
+        &mut self,
+    ) -> Result<
+        songbird::input::AudioStream<Box<dyn songbird::input::core::io::MediaSource>>,
+        songbird::input::AudioStreamError,
+    > {
+        self.create()
+    }
+
+    fn should_create_async(&self) -> bool {
+        false
+    }
+}
 
 struct TrackErrorNotifier;
 
@@ -162,67 +239,13 @@ pub async fn volume(ctx: Context<'_>, volume: u8) -> Result<(), Error> {
     Ok(())
 }
 
-async fn download_to_bytes(url: &str) -> Result<Vec<u8>, std::io::Error> {
-    // Verify ffmpeg is installed
-    if std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .is_err()
-    {
-        println!("FFmpeg is not installed or not found in the system PATH");
-
-        return Ok(vec![]);
-    }
-
-    // Use ffmpeg to download and convert the audio stream to opus format
-    let output = std::process::Command::new("ffmpeg")
-        .args([
-            "-i",
-            &url,
-            "-c:a",
-            "libopus",
-            "-f",
-            "opus",
-            "pipe:1",
-            "-loglevel",
-            "error",
-        ])
-        .stdout(std::process::Stdio::piped())
-        .spawn()?
-        .wait_with_output()
-        .expect("Failed to start ffmpeg process");
-
-    if !output.status.success() {
-        println!("Failed to download and/or convert audio stream with ffmpeg.");
-    }
-
-    Ok(output.stdout)
-}
-
 async fn enqueue_track(
-    ctx: &Context<'_>,
     handler: &mut songbird::Call,
     track: &crate::track::Track,
 ) -> Result<(), Error> {
-    let storage = ctx.data().storage.lock().await;
-    let file_name = format!("{}.opus", track.id);
-    let file_path = match storage.exists(&file_name).await {
-        true => {
-            println!("Track already exists in storage: {}", file_name);
-            storage.storage_dir.join(file_name)
-        }
-        false => {
-            let file_bytes = download_to_bytes(&track.stream_url).await?;
-            let file_path = storage.storage_dir.join(&file_name);
-            storage.insert(file_name, file_bytes).await?;
-            file_path
-        }
-    };
-    drop(storage);
-
-    let stream = songbird::input::File::new(file_path);
+    let stream = songbird::input::Input::Lazy(Box::new(FfmpegStream::new(&track.stream_url)));
     let data = std::sync::Arc::new(track.clone());
-    let songbird_track = songbird::tracks::Track::new_with_data(stream.into(), data);
+    let songbird_track = songbird::tracks::Track::new_with_data(stream, data);
 
     let _ = handler.enqueue(songbird_track).await;
 
@@ -307,7 +330,7 @@ pub async fn play(
         let mut handler = handler_lock.lock().await;
 
         for track in &tracks {
-            enqueue_track(&ctx, &mut handler, track).await?;
+            enqueue_track(&mut handler, track).await?;
         }
 
         if tracks.len() == 1 {

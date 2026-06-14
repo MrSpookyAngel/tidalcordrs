@@ -2,11 +2,9 @@ use crate::commands::Error;
 
 #[derive(Debug, Clone)]
 pub struct Track {
-    pub id: String,
     pub title: String,
     pub artist: String,
     pub featured_artists: Vec<String>, // Can be empty
-    pub album: String,
     pub duration: u32,
     pub stream_url: String,
 }
@@ -45,12 +43,6 @@ impl Track {
 
         let json = response.json::<serde_json::Value>().await?;
 
-        let id = json["trackId"]
-            .as_u64()
-            .map(|id| id.to_string())
-            .or_else(|| json["trackId"].as_str().map(String::from))
-            .unwrap_or(track_id);
-
         let title = track_response["title"]
             .as_str()
             .ok_or("Expected title")?
@@ -69,11 +61,6 @@ impl Track {
             .filter_map(|artist| artist["name"].as_str().map(String::from))
             .collect();
 
-        let album = track_response["album"]["title"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-
         let duration = track_response["duration"]
             .as_u64()
             .ok_or("Expected duration")?
@@ -85,11 +72,9 @@ impl Track {
             .to_string();
 
         Ok(Track {
-            id,
             title,
             artist,
             featured_artists,
-            album,
             duration,
             stream_url,
         })

@@ -11,8 +11,6 @@ services:
 
       # Configuration (change these as needed)
       COMMAND_PREFIX: "!"
-      STORAGE_DIR: "data/tracks"
-      STORAGE_MAX_SIZE_BYTES: "1073741824" # 1 GiB
       TIDAL_TOKEN_SESSION_PATH: "data/tidal_token.json"
 
       # Requests Configuration (probably don't change these)
