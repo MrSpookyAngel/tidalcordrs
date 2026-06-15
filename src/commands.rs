@@ -18,10 +18,10 @@ impl songbird::events::EventHandler for TrackErrorNotifier {
     ) -> Option<songbird::events::Event> {
         if let songbird::events::EventContext::Track(track_list) = ctx {
             for (state, handle) in *track_list {
-                println!(
-                    "Track {:?} encountered an error: {:?}",
-                    handle.uuid(),
-                    state.playing
+                tracing::error!(
+                    track_id = ?handle.uuid(),
+                    state = ?state.playing,
+                    "Track encountered an error"
                 );
             }
         }
@@ -308,6 +308,13 @@ pub async fn play(
     }
 
     let query = query_or_url.unwrap();
+    tracing::info!(
+        guild_id = %guild_id,
+        user_id = %ctx.author().id,
+        user = %ctx.author().name,
+        query = %query,
+        "User search"
+    );
 
     let _ = ctx.defer().await;
 
@@ -345,6 +352,15 @@ pub async fn play(
         }
 
         if tracks.len() == 1 {
+            tracing::info!(
+                guild_id = %guild_id,
+                user_id = %ctx.author().id,
+                user = %ctx.author().name,
+                artist = %tracks[0].artist,
+                title = %tracks[0].title,
+                duration_seconds = tracks[0].duration,
+                "Queued track"
+            );
             ctx.say(format!(
                 "{} added **{}** to the queue.",
                 ctx.author().name,
@@ -352,6 +368,14 @@ pub async fn play(
             ))
             .await?;
         } else {
+            tracing::info!(
+                guild_id = %guild_id,
+                user_id = %ctx.author().id,
+                user = %ctx.author().name,
+                track_count = tracks.len(),
+                query = %query,
+                "Queued multiple tracks"
+            );
             ctx.say(format!(
                 "{} added **{} tracks** to the queue.",
                 ctx.author().name,
@@ -497,7 +521,7 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     if let Some(manager) = songbird::get(ctx.serenity_context()).await {
         // Leave the voice channel
         let _ = manager.remove(guild_id).await;
-        println!("Left the voice channel. Guild ID: {}", guild_id);
+        tracing::info!(guild_id = %guild_id, "Left voice channel");
     } else {
         ctx.say("Not connected to a voice channel.").await?;
     }

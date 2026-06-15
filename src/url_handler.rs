@@ -28,7 +28,7 @@ pub async fn handle_url(
             let youtube_domains = ["youtube.com", "youtu.be"];
 
             if youtube_domains.iter().any(|&d| domain.contains(d)) {
-                println!("Detected YouTube URL. Extracting metadata...");
+                tracing::info!(url = input, "Detected YouTube URL; extracting metadata");
                 let metadata = extract_youtube_metadata(input).await?;
                 Ok(session
                     .find_track_by_details(&metadata.title, &metadata.artist, &metadata.album)
@@ -36,7 +36,7 @@ pub async fn handle_url(
                     .into_iter()
                     .collect())
             } else if domain.contains("tidal.com") {
-                println!("Detected Tidal URL. Resolving...");
+                tracing::info!(url = input, "Detected Tidal URL; resolving");
                 match parse_tidal_resource(&url) {
                     Some((TidalResource::Track, id)) => {
                         Ok(vec![session.find_track_by_id(&id).await?])
@@ -65,7 +65,7 @@ pub async fn handle_url(
                     },
                 }
             } else {
-                println!("Unsupported host: {:?}", url);
+                tracing::warn!(url = %url, "Unsupported URL host");
                 Ok(Vec::new())
             }
         }

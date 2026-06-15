@@ -232,20 +232,25 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new() -> Self {
-        Config {
-            tidal_client_id: std::env::var("TIDAL_CLIENT_ID").expect("TIDAL_CLIENT_ID must be set"),
-            tidal_client_secret: std::env::var("TIDAL_CLIENT_SECRET")
-                .expect("TIDAL_CLIENT_SECRET must be set"),
-            path_to_session: std::env::var("TIDAL_TOKEN_SESSION_PATH")
-                .expect("TIDAL_TOKEN_SESSION_PATH must be set"),
-            user_agent: std::env::var("USER_AGENT").expect("USER_AGENT must be set"),
-            oauth_device_auth_url: std::env::var("OAUTH_DEVICE_AUTH_URL")
-                .expect("OAUTH_DEVICE_AUTH_URL must be set"),
-            oauth_token_url: std::env::var("OAUTH_TOKEN_URL").expect("OAUTH_TOKEN_URL must be set"),
-            sessions_url: std::env::var("SESSIONS_URL").expect("SESSIONS_URL must be set"),
-            search_url: std::env::var("SEARCH_URL").expect("SEARCH_URL must be set"),
-        }
+    pub fn new() -> Result<Self, Error> {
+        Ok(Config {
+            tidal_client_id: required_env("TIDAL_CLIENT_ID")?,
+            tidal_client_secret: required_env("TIDAL_CLIENT_SECRET")?,
+            path_to_session: required_env("TIDAL_TOKEN_SESSION_PATH")?,
+            user_agent: required_env("USER_AGENT")?,
+            oauth_device_auth_url: required_env("OAUTH_DEVICE_AUTH_URL")?,
+            oauth_token_url: required_env("OAUTH_TOKEN_URL")?,
+            sessions_url: required_env("SESSIONS_URL")?,
+            search_url: required_env("SEARCH_URL")?,
+        })
+    }
+}
+
+fn required_env(name: &str) -> Result<String, Error> {
+    match std::env::var(name) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Err(format!("{name} must be set").into()),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
     }
 }
 
@@ -262,10 +267,10 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn new() -> Self {
+    pub async fn new() -> Result<Self, Error> {
         let mut session = Session {
             client: reqwest::Client::new(),
-            config: Config::new(),
+            config: Config::new()?,
             access_token: String::new(),
             refresh_token: String::new(),
             token_type: String::new(),
@@ -274,22 +279,22 @@ impl Session {
             user_id: 0,
         };
 
-        session.start().await.expect("Failed to start session.");
+        session.start().await?;
 
-        session
+        Ok(session)
     }
 
     async fn start(&mut self) -> Result<(), Error> {
         // Attempt to load the token from the file
         if let Ok(()) = self.load_token_from_file().await {
-            println!("Token loaded from file successfully.");
+            tracing::info!("Token loaded from file successfully");
             match self.set_session_response().await {
                 Ok(()) => {
-                    println!("Session started successfully.");
+                    tracing::info!("Session started successfully");
                 }
                 Err(e) => {
-                    println!("Failed to set session response: {}.", e);
-                    println!("Attempting to refresh token.");
+                    tracing::warn!(error = %e, "Failed to set session response");
+                    tracing::info!("Attempting to refresh token");
 
                     // If setting the session response fails, try to refresh the token
                     self.refresh_token().await?;
@@ -297,15 +302,19 @@ impl Session {
                     // Retry setting the session response after refreshing the token
                     match self.set_session_response().await {
                         Ok(()) => {
-                            println!("Session response set successfully after refreshing token.");
+                            tracing::info!(
+                                "Session response set successfully after refreshing token"
+                            );
                             return Ok(());
                         }
                         Err(e2) => {
-                            println!(
-                                "Failed to set session response after refreshing token: {}",
-                                e2
+                            tracing::error!(
+                                error = %e2,
+                                "Failed to set session response after refreshing token"
                             );
-                            println!("Perhaps you should try to delete your token and re-login.");
+                            tracing::warn!(
+                                "Perhaps you should try to delete your token and re-login"
+                            );
                             return Err(e2);
                         }
                     }
@@ -313,12 +322,12 @@ impl Session {
             }
             return Ok(());
         } else {
-            println!("No token found, starting device authorization flow.");
+            tracing::info!("No token found, starting device authorization flow");
         }
 
         // If no token, then start the login process
         self.login().await?;
-        println!("Login successful, session started.");
+        tracing::info!("Login successful, session started");
 
         Ok(())
     }
@@ -345,10 +354,8 @@ impl Session {
 
         let login_response: LoginResponse = response.json().await?;
 
-        println!(
-            "Please visit: https://{}",
-            login_response.verification_uri_complete
-        );
+        let verification_url = format!("https://{}", login_response.verification_uri_complete);
+        tracing::info!(%verification_url, "Please authorize Tidal device login");
 
         self.create_token(login_response).await?;
 
@@ -402,14 +409,15 @@ impl Session {
                         );
                         self.save_token_to_file(token)?;
 
-                        println!("Token created successfully.");
+                        tracing::info!("Token created successfully");
                         return Ok(());
                     } else {
                         tokio::time::sleep(interval).await;
                         counter += login_response.interval;
                     }
                 }
-                Err(_) => {
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to poll Tidal token endpoint");
                     break;
                 }
             }
@@ -562,7 +570,7 @@ impl Session {
             match result {
                 Ok(outcome) => outcomes.push(outcome),
                 Err(error) => {
-                    println!("Collection track fetch task failed: {}", error);
+                    tracing::error!(%error, "Collection track fetch task failed");
                 }
             }
         }
@@ -591,7 +599,7 @@ impl Session {
                     retry_ids.push((outcome.index, outcome.id));
                 }
                 Err(FetchTrackError::Stream(error)) => {
-                    println!("Skipping collection track {}: {}", outcome.id, error);
+                    tracing::warn!(track_id = %outcome.id, %error, "Skipping collection track");
                 }
             }
         }
@@ -610,14 +618,18 @@ impl Session {
                         match outcome.result {
                             Ok(track) => tracks[outcome.index] = Some(track),
                             Err(error) => {
-                                println!("Skipping collection track {}: {}", outcome.id, error);
+                                tracing::warn!(
+                                    track_id = %outcome.id,
+                                    %error,
+                                    "Skipping collection track"
+                                );
                             }
                         }
                     }
                 }
                 Err(error) => {
                     for (_, id) in retry_ids {
-                        println!("Skipping collection track {}: {}", id, error);
+                        tracing::warn!(track_id = %id, %error, "Skipping collection track");
                     }
                 }
             }
@@ -656,7 +668,7 @@ impl Session {
             Ok(resp) if resp.status().is_success() => Ok(resp.json().await?),
             Ok(resp) => Err(format!("Search failed with status: {}", resp.status()).into()),
             Err(e) => {
-                println!("Please check your access token and network connection.");
+                tracing::warn!("Please check your access token and network connection");
                 Err(format!("Error during search: {}", e).into())
             }
         }
@@ -826,7 +838,7 @@ impl Session {
                 match track::Track::from_track_id(self, &track_response).await {
                     Ok(track) => tracks.push(track),
                     Err(error) => {
-                        println!("Skipping collection track: {}", error);
+                        tracing::warn!(%error, "Skipping collection track");
                     }
                 }
             }
@@ -863,9 +875,11 @@ impl Session {
         match ids {
             Ok(ids) => Ok(self.find_collection_tracks_by_ids(ids, concurrency).await),
             Err(error) => {
-                println!(
-                    "Falling back to legacy collection endpoint for {} {}: {}",
-                    collection_type, collection_id, error
+                tracing::warn!(
+                    collection_type,
+                    collection_id,
+                    %error,
+                    "Falling back to legacy collection endpoint"
                 );
                 self.legacy_collection_tracks(collection_type, collection_id)
                     .await

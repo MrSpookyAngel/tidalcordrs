@@ -6,6 +6,7 @@ mod url_handler;
 
 use poise::serenity_prelude as serenity;
 use songbird::SerenityInit;
+use std::process::ExitCode;
 
 async fn event_handler(
     ctx: &serenity::Context,
@@ -70,10 +71,7 @@ async fn event_handler(
                 // Disconnect if bot is the remaining user in a voice channel after 5 minutes
                 if should_disconnect && let Some(manager) = songbird::get(&ctx_clone).await {
                     let _ = manager.remove(guild_id).await;
-                    println!(
-                        "Left voice channel in guild {} due to 5 minutes of inactivity",
-                        guild_id
-                    );
+                    tracing::info!(guild_id = %guild_id, "Left voice channel due to inactivity");
                 }
             });
         }
@@ -82,32 +80,70 @@ async fn event_handler(
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> ExitCode {
+    init_logging();
+
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(%error, "Application error");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn init_logging() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("tidalcordrs=info")),
+        )
+        .init();
+}
+
+fn required_env(name: &str) -> Result<String, commands::Error> {
+    match std::env::var(name) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Err(format!("{name} must be set").into()),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
+    }
+}
+
+fn optional_env_parse<T>(name: &str, default: T) -> Result<T, commands::Error>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<T>()
+            .map_err(|error| format!("Failed to parse {name}: {error}").into()),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
+    }
+}
+
+async fn run() -> Result<(), commands::Error> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Load environment variables from .env file if it exists
     dotenvy::dotenv_override().ok();
-    let token = std::env::var("DISCORD_TOKEN").expect("Expected a token in the environment");
-    let prefix =
-        std::env::var("COMMAND_PREFIX").expect("Expected a command prefix in the environment");
-    let spool_read_ahead_bytes = std::env::var("SPOOL_READ_AHEAD_MIB")
-        .unwrap_or_else(|_| "16".to_string())
-        .parse::<u64>()
-        .expect("Failed to parse SPOOL_READ_AHEAD_MIB")
+    let token = required_env("DISCORD_TOKEN")?;
+    let prefix = required_env("COMMAND_PREFIX")?;
+    let spool_read_ahead_bytes = optional_env_parse::<u64>("SPOOL_READ_AHEAD_MIB", 16)?
         .checked_mul(1024 * 1024)
-        .expect("SPOOL_READ_AHEAD_MIB is too large");
-    let collection_track_fetch_concurrency = std::env::var("COLLECTION_TRACK_FETCH_CONCURRENCY")
-        .unwrap_or_else(|_| session::DEFAULT_COLLECTION_TRACK_FETCH_CONCURRENCY.to_string())
-        .parse::<usize>()
-        .expect("Failed to parse COLLECTION_TRACK_FETCH_CONCURRENCY");
-    assert!(
-        collection_track_fetch_concurrency > 0,
-        "COLLECTION_TRACK_FETCH_CONCURRENCY must be greater than 0"
-    );
+        .ok_or("SPOOL_READ_AHEAD_MIB is too large")?;
+    let collection_track_fetch_concurrency = optional_env_parse::<usize>(
+        "COLLECTION_TRACK_FETCH_CONCURRENCY",
+        session::DEFAULT_COLLECTION_TRACK_FETCH_CONCURRENCY,
+    )?;
+    if collection_track_fetch_concurrency == 0 {
+        return Err("COLLECTION_TRACK_FETCH_CONCURRENCY must be greater than 0".into());
+    }
     let version = env!("CARGO_PKG_VERSION");
 
     // Initialize the Tidal session
-    let tidal_session = session::Session::new().await;
+    let tidal_session = session::Session::new().await?;
 
     // Set the intents
     let intents = serenity::GatewayIntents::GUILDS
@@ -142,7 +178,7 @@ async fn main() {
         })
         .setup(move |_ctx, ready, _framework| {
             Box::pin(async move {
-                println!("{} is connected! (v{})", ready.user.name, version);
+                tracing::info!(user = %ready.user.name, version, "Bot connected");
                 Ok(commands::Data {
                     session: tokio::sync::Mutex::new(tidal_session),
                     spool_read_ahead_bytes,
@@ -157,28 +193,35 @@ async fn main() {
         .framework(framework)
         .register_songbird()
         .await
-        .expect("Error creating client");
+        .map_err(|error| format!("Error creating client: {error}"))?;
 
     let shard_manager = client.shard_manager.clone();
 
     // Start the client
     let client_task = tokio::spawn(async move {
         if let Err(why) = client.start().await {
-            println!("Client error: {why:?}");
+            tracing::error!(error = ?why, "Client error");
         }
     });
 
     // Handle Ctrl+C to gracefully shut down the client
     tokio::spawn(async move {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for Ctrl+C");
-        println!("Ctrl+C received, shutting down...");
-        shard_manager.shutdown_all().await;
-        println!("Shutdown complete.");
-        std::process::exit(0);
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                tracing::info!("Ctrl+C received, shutting down");
+                shard_manager.shutdown_all().await;
+                tracing::info!("Shutdown complete");
+            }
+            Err(error) => {
+                tracing::error!(%error, "Failed to listen for Ctrl+C");
+            }
+        }
     });
 
     // Wait for the client task to finish
-    client_task.await.expect("Client task failed to complete");
+    client_task
+        .await
+        .map_err(|error| format!("Client task failed to complete: {error}"))?;
+
+    Ok(())
 }
