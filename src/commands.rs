@@ -130,7 +130,12 @@ pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 #[poise::command(slash_command, prefix_command, aliases("volume", "vol"), guild_only)]
-pub async fn volume(ctx: Context<'_>, volume: u8) -> Result<(), Error> {
+pub async fn volume(ctx: Context<'_>, volume: Option<u8>) -> Result<(), Error> {
+    if volume.is_some_and(|volume| volume > 200) {
+        ctx.say("Volume must be between 0 and 200.").await?;
+        return Ok(());
+    }
+
     // Get the guild ID
     let guild_id = match ctx.guild_id() {
         Some(guild_id) => guild_id,
@@ -150,11 +155,20 @@ pub async fn volume(ctx: Context<'_>, volume: u8) -> Result<(), Error> {
         let handler = handler_lock.lock().await;
 
         // Set the volume
-        if let Some(track_handle) = handler.queue().current().as_mut() {
-            let _ = track_handle.set_volume(volume as f32 / 100.0);
-        }
+        let mut current = handler.queue().current();
+        let Some(track_handle) = current.as_mut() else {
+            ctx.say("No track is currently playing.").await?;
+            return Ok(());
+        };
 
-        ctx.say(format!("Volume set to {}.", volume)).await?;
+        if let Some(volume) = volume {
+            let _ = track_handle.set_volume(volume as f32 / 100.0);
+            ctx.say(format!("Volume set to {}%.", volume)).await?;
+        } else {
+            let track_info = track_handle.get_info().await?;
+            let volume = (track_info.volume * 100.0).round() as u32;
+            ctx.say(format!("Current volume: {}%.", volume)).await?;
+        }
     } else {
         ctx.say("Not connected to a voice channel.").await?;
     }
@@ -229,8 +243,6 @@ pub async fn play(
     let query = query_or_url.unwrap();
 
     let _ = ctx.defer().await;
-
-    try_join_voice_channel(ctx).await?;
 
     let mut session = ctx.data().session.lock().await;
 
