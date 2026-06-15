@@ -9,12 +9,13 @@ services:
       # Credentials (change this)
       DISCORD_TOKEN: "${DISCORD_TOKEN}"
 
-      # Configuration (change these as needed)
+      # Configuration (change these if you want)
       COMMAND_PREFIX: "!"
-      SPOOL_READ_AHEAD_MIB: "16"
-      TIDAL_TOKEN_SESSION_PATH: "data/tidal_token.json"
 
-      # Requests Configuration (probably don't change these)
+      # Technical Configuration (only change these if you know what you're doing)
+      SPOOL_READ_AHEAD_MIB: "16"
+      COLLECTION_TRACK_FETCH_CONCURRENCY: "8"
+      TIDAL_TOKEN_SESSION_PATH: "data/tidal_token.json"
       TIDAL_CLIENT_ID: "fX2JxdmntZWK0ixT"
       TIDAL_CLIENT_SECRET: "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
       USER_AGENT: "Mozilla/5.0 (Linux; Android 10; uis8581a2h10_Automotive) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36"

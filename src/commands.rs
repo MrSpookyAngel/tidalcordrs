@@ -3,6 +3,7 @@ use songbird::tracks::PlayMode;
 pub struct Data {
     pub session: tokio::sync::Mutex<crate::session::Session>,
     pub spool_read_ahead_bytes: u64,
+    pub collection_track_fetch_concurrency: usize,
 }
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
@@ -312,7 +313,12 @@ pub async fn play(
 
     let mut session = ctx.data().session.lock().await;
 
-    let mut tracks = crate::url_handler::handle_url(&mut session, &query).await?;
+    let mut tracks = crate::url_handler::handle_url(
+        &mut session,
+        &query,
+        ctx.data().collection_track_fetch_concurrency,
+    )
+    .await?;
 
     if tracks.is_empty() {
         tracks = {

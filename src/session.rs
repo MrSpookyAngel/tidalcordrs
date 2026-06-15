@@ -1,6 +1,8 @@
 use crate::commands::Error;
 use crate::track;
 
+pub const DEFAULT_COLLECTION_TRACK_FETCH_CONCURRENCY: usize = 8;
+
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct LoginResponse {
@@ -88,6 +90,83 @@ struct LegacyCollectionTracksPage {
     items: Vec<LegacyCollectionTrackItem>,
     total_number_of_items: Option<u64>,
     total: Option<u64>,
+}
+
+#[derive(Clone)]
+struct TrackFetchContext {
+    client: reqwest::Client,
+    user_agent: String,
+    token_type: String,
+    access_token: String,
+    session_id: String,
+    country_code: String,
+}
+
+impl TrackFetchContext {
+    async fn get_track_response(&self, track_id: &str) -> Result<track::TidalTrackResponse, Error> {
+        let url = format!("https://api.tidal.com/v1/tracks/{}", track_id);
+        let params = [
+            ("sessionId", self.session_id.as_str()),
+            ("countryCode", self.country_code.as_str()),
+        ];
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("User-Agent", self.user_agent.parse()?);
+        headers.insert(
+            "Authorization",
+            format!("{} {}", self.token_type, self.access_token).parse()?,
+        );
+        headers.insert("Accept", "application/json".parse()?);
+
+        let response = self
+            .client
+            .get(&url)
+            .headers(headers)
+            .query(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(response_error("Track lookup failed", response).await);
+        }
+
+        Ok(response.json().await?)
+    }
+
+    async fn fetch_track(&self, track_id: &str) -> Result<track::Track, FetchTrackError> {
+        let track_response = self
+            .get_track_response(track_id)
+            .await
+            .map_err(FetchTrackError::TrackResponse)?;
+
+        track::Track::from_track_response(
+            &self.client,
+            &self.session_id,
+            &self.country_code,
+            &track_response,
+        )
+        .await
+        .map_err(FetchTrackError::Stream)
+    }
+}
+
+enum FetchTrackError {
+    TrackResponse(Error),
+    Stream(Error),
+}
+
+impl std::fmt::Display for FetchTrackError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TrackResponse(error) | Self::Stream(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+struct TrackFetchOutcome {
+    index: usize,
+    id: String,
+    result: Result<track::Track, FetchTrackError>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -443,6 +522,110 @@ impl Session {
         Ok(())
     }
 
+    fn track_fetch_context(&self) -> TrackFetchContext {
+        TrackFetchContext {
+            client: self.client.clone(),
+            user_agent: self.config.user_agent.clone(),
+            token_type: self.token_type.clone(),
+            access_token: self.access_token.clone(),
+            session_id: self.session_id.clone(),
+            country_code: self.country_code.clone(),
+        }
+    }
+
+    async fn fetch_tracks_bounded(
+        context: TrackFetchContext,
+        ids: Vec<(usize, String)>,
+        concurrency: usize,
+    ) -> Vec<TrackFetchOutcome> {
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let mut tasks = tokio::task::JoinSet::new();
+
+        for (index, id) in ids {
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("Track fetch semaphore should not close");
+            let context = context.clone();
+
+            tasks.spawn(async move {
+                let _permit = permit;
+                let result = context.fetch_track(&id).await;
+                TrackFetchOutcome { index, id, result }
+            });
+        }
+
+        let mut outcomes = Vec::new();
+
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(outcome) => outcomes.push(outcome),
+                Err(error) => {
+                    println!("Collection track fetch task failed: {}", error);
+                }
+            }
+        }
+
+        outcomes.sort_by_key(|outcome| outcome.index);
+        outcomes
+    }
+
+    async fn find_collection_tracks_by_ids(
+        &mut self,
+        ids: Vec<String>,
+        concurrency: usize,
+    ) -> Vec<track::Track> {
+        let mut tracks = Vec::new();
+        tracks.resize_with(ids.len(), || None);
+
+        let indexed_ids = ids.into_iter().enumerate().collect::<Vec<_>>();
+        let first_pass =
+            Self::fetch_tracks_bounded(self.track_fetch_context(), indexed_ids, concurrency).await;
+        let mut retry_ids = Vec::new();
+
+        for outcome in first_pass {
+            match outcome.result {
+                Ok(track) => tracks[outcome.index] = Some(track),
+                Err(FetchTrackError::TrackResponse(_)) => {
+                    retry_ids.push((outcome.index, outcome.id));
+                }
+                Err(FetchTrackError::Stream(error)) => {
+                    println!("Skipping collection track {}: {}", outcome.id, error);
+                }
+            }
+        }
+
+        if !retry_ids.is_empty() {
+            match self.refresh_token().await {
+                Ok(()) => {
+                    let second_pass = Self::fetch_tracks_bounded(
+                        self.track_fetch_context(),
+                        retry_ids,
+                        concurrency,
+                    )
+                    .await;
+
+                    for outcome in second_pass {
+                        match outcome.result {
+                            Ok(track) => tracks[outcome.index] = Some(track),
+                            Err(error) => {
+                                println!("Skipping collection track {}: {}", outcome.id, error);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    for (_, id) in retry_ids {
+                        println!("Skipping collection track {}: {}", id, error);
+                    }
+                }
+            }
+        }
+
+        tracks.into_iter().flatten().collect()
+    }
+
     async fn search_tracks(&self, query: &str, limit: u32) -> Result<SearchTracksResponse, Error> {
         let limit = limit.to_string();
 
@@ -664,6 +847,7 @@ impl Session {
         &mut self,
         collection_type: &str,
         collection_id: &str,
+        concurrency: usize,
     ) -> Result<Vec<track::Track>, Error> {
         let mut ids = self
             .collection_track_ids(collection_type, collection_id)
@@ -677,20 +861,7 @@ impl Session {
         }
 
         match ids {
-            Ok(ids) => {
-                let mut tracks = Vec::with_capacity(ids.len());
-
-                for id in ids {
-                    match self.find_track_by_id(&id).await {
-                        Ok(track) => tracks.push(track),
-                        Err(error) => {
-                            println!("Skipping collection track {}: {}", id, error);
-                        }
-                    }
-                }
-
-                Ok(tracks)
-            }
+            Ok(ids) => Ok(self.find_collection_tracks_by_ids(ids, concurrency).await),
             Err(error) => {
                 println!(
                     "Falling back to legacy collection endpoint for {} {}: {}",

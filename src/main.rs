@@ -96,6 +96,14 @@ async fn main() {
         .expect("Failed to parse SPOOL_READ_AHEAD_MIB")
         .checked_mul(1024 * 1024)
         .expect("SPOOL_READ_AHEAD_MIB is too large");
+    let collection_track_fetch_concurrency = std::env::var("COLLECTION_TRACK_FETCH_CONCURRENCY")
+        .unwrap_or_else(|_| session::DEFAULT_COLLECTION_TRACK_FETCH_CONCURRENCY.to_string())
+        .parse::<usize>()
+        .expect("Failed to parse COLLECTION_TRACK_FETCH_CONCURRENCY");
+    assert!(
+        collection_track_fetch_concurrency > 0,
+        "COLLECTION_TRACK_FETCH_CONCURRENCY must be greater than 0"
+    );
     let version = env!("CARGO_PKG_VERSION");
 
     // Initialize the Tidal session
@@ -138,6 +146,7 @@ async fn main() {
                 Ok(commands::Data {
                     session: tokio::sync::Mutex::new(tidal_session),
                     spool_read_ahead_bytes,
+                    collection_track_fetch_concurrency,
                 })
             })
         })

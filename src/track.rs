@@ -62,6 +62,21 @@ impl Track {
         session: &crate::session::Session,
         track_response: &TidalTrackResponse,
     ) -> Result<Self, Error> {
+        Self::from_track_response(
+            &session.client,
+            &session.session_id,
+            &session.country_code,
+            track_response,
+        )
+        .await
+    }
+
+    pub async fn from_track_response(
+        client: &reqwest::Client,
+        session_id: &str,
+        country_code: &str,
+        track_response: &TidalTrackResponse,
+    ) -> Result<Self, Error> {
         let track_id = track_response.id();
 
         let url = format!(
@@ -70,15 +85,14 @@ impl Track {
         );
 
         let params = [
-            ("sessionId", session.session_id.as_str()),
-            ("countryCode", session.country_code.as_str()),
+            ("sessionId", session_id),
+            ("countryCode", country_code),
             ("urlusagemode", "STREAM"),
             ("audioquality", "HIGH"),
             ("assetpresentation", "FULL"),
         ];
 
-        let response = session
-            .client
+        let response = client
             .get(&url)
             .query(&params)
             .send()

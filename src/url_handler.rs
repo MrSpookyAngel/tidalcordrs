@@ -18,6 +18,7 @@ pub struct YouTubeMetadata {
 pub async fn handle_url(
     session: &mut crate::session::Session,
     input: &str,
+    collection_track_fetch_concurrency: usize,
 ) -> Result<Vec<Track>, Error> {
     let parsed_url = url::Url::parse(input);
 
@@ -41,10 +42,22 @@ pub async fn handle_url(
                         Ok(vec![session.find_track_by_id(&id).await?])
                     }
                     Some((TidalResource::Playlist, id)) => {
-                        session.find_collection_tracks("playlists", &id).await
+                        session
+                            .find_collection_tracks(
+                                "playlists",
+                                &id,
+                                collection_track_fetch_concurrency,
+                            )
+                            .await
                     }
                     Some((TidalResource::Album, id)) => {
-                        session.find_collection_tracks("albums", &id).await
+                        session
+                            .find_collection_tracks(
+                                "albums",
+                                &id,
+                                collection_track_fetch_concurrency,
+                            )
+                            .await
                     }
                     None => match extract_tidal_info(input).await? {
                         Some(search) => session.find_tracks(&search, 1).await,
