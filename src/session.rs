@@ -57,6 +57,39 @@ impl Token {
     }
 }
 
+async fn response_error(message: &str, response: reqwest::Response) -> Error {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("failed to read response body: {error}"));
+
+    format!("{message}: status {status}, body: {body}").into()
+}
+
+#[cfg(unix)]
+fn create_token_file(path: &str) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn create_token_file(path: &str) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+}
+
 #[derive(Debug)]
 pub struct Config {
     tidal_client_id: String,
@@ -225,12 +258,11 @@ impl Session {
                     if resp.status().is_success() {
                         let token_response: TokenResponse = resp.json().await?;
 
-                        self.access_token = token_response.access_token.clone();
+                        self.access_token = token_response.access_token;
                         self.refresh_token = token_response
                             .refresh_token
-                            .expect("Refresh token is missing")
-                            .clone();
-                        self.token_type = token_response.token_type.clone();
+                            .ok_or("Token response did not include a refresh token")?;
+                        self.token_type = token_response.token_type;
 
                         self.set_session_response().await?;
 
@@ -281,6 +313,9 @@ impl Session {
                     let token_response: TokenResponse = resp.json().await?;
 
                     self.access_token = token_response.access_token;
+                    if let Some(refresh_token) = token_response.refresh_token {
+                        self.refresh_token = refresh_token;
+                    }
                     self.token_type = token_response.token_type;
 
                     self.set_session_response().await?;
@@ -295,7 +330,7 @@ impl Session {
 
                     Ok(())
                 } else {
-                    Err("Failed to refresh token".into())
+                    Err(response_error("Failed to refresh token", resp).await)
                 }
             }
             Err(e) => Err(format!("Error refreshing token: {}", e).into()),
@@ -334,8 +369,8 @@ impl Session {
             std::fs::create_dir_all(parent)?;
         }
 
-        let f = std::fs::File::create(&self.config.path_to_session);
-        let writer = std::io::BufWriter::new(f?);
+        let f = create_token_file(&self.config.path_to_session)?;
+        let writer = std::io::BufWriter::new(f);
         serde_json::to_writer_pretty(writer, &token)?;
 
         Ok(())
