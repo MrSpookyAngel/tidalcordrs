@@ -60,6 +60,7 @@ pub async fn handle_url(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum TidalResource {
     Track,
     Playlist,
@@ -89,6 +90,16 @@ fn parse_tidal_resource(url: &url::Url) -> Option<(TidalResource, String)> {
     }
 
     None
+}
+
+fn clean_youtube_title(title: &str) -> String {
+    let re = RE.get_or_init(|| regex::Regex::new(r"\s*[\[\(].*?[\]\)]").unwrap());
+    let feat_re =
+        FEAT_RE.get_or_init(|| regex::Regex::new(r"(?i)\b(feat|ft|featuring)\b.*").unwrap());
+
+    let no_brackets = re.replace_all(title, "");
+    let no_feat = feat_re.replace_all(&no_brackets, "");
+    no_feat.trim().to_lowercase()
 }
 
 async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
@@ -148,17 +159,6 @@ async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
     let data: serde_json::Value =
         serde_json::from_str(&raw_json).map_err(|e| Error::from(e.to_string()))?;
 
-    let re = RE.get_or_init(|| regex::Regex::new(r"\s*[\[\(].*?[\]\)]").unwrap());
-    let feat_re =
-        FEAT_RE.get_or_init(|| regex::Regex::new(r"(?i)\b(feat|ft|featuring)\b.*").unwrap());
-
-    // Remove brackets, remove feat, trim, lowercase
-    let clean = |s: &str| -> String {
-        let no_brackets = re.replace_all(s, "");
-        let no_feat = feat_re.replace_all(&no_brackets, "");
-        no_feat.trim().to_lowercase()
-    };
-
     // 1. Attempt to get track details if in "Artist - Song" format
     let video_details = data.pointer(
         "/playerOverlays/playerOverlayRenderer/videoDetails/playerOverlayVideoDetailsRenderer",
@@ -170,7 +170,7 @@ async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
             .and_then(|s| s.as_str())
             .unwrap_or("");
 
-        let clean_video_title = clean(raw_video_title);
+        let clean_video_title = clean_youtube_title(raw_video_title);
 
         let separators = [" - ", " – ", " — ", " : "];
         for sep in separators {
@@ -200,7 +200,7 @@ async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
                     .unwrap_or("")
                     .to_lowercase();
 
-                let title = clean(raw_title);
+                let title = clean_youtube_title(raw_title);
 
                 if !title.is_empty() && !artist.is_empty() {
                     return Ok(YouTubeMetadata {
@@ -230,7 +230,7 @@ async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
             .to_lowercase();
 
         return Ok(YouTubeMetadata {
-            title: clean(raw_title),
+            title: clean_youtube_title(raw_title),
             artist: uploader,
             album: "".to_string(),
         });
@@ -267,4 +267,55 @@ async fn extract_tidal_info(url: &str) -> Result<Option<String>, Error> {
     rewriter.end()?;
 
     Ok(extracted_title.take())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(url: &str) -> Option<(TidalResource, String)> {
+        parse_tidal_resource(&url::Url::parse(url).unwrap())
+    }
+
+    #[test]
+    fn parses_tidal_track_urls() {
+        assert_eq!(
+            parse("https://tidal.com/browse/track/123456789"),
+            Some((TidalResource::Track, "123456789".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_tidal_playlist_and_album_urls() {
+        assert_eq!(
+            parse("https://tidal.com/browse/playlist/05f75c8a-a5be-4f4c-8d53"),
+            Some((
+                TidalResource::Playlist,
+                "05f75c8a-a5be-4f4c-8d53".to_string()
+            ))
+        );
+        assert_eq!(
+            parse("https://tidal.com/browse/album/987654321"),
+            Some((TidalResource::Album, "987654321".to_string()))
+        );
+    }
+
+    #[test]
+    fn ignores_tidal_urls_without_supported_resource() {
+        assert_eq!(parse("https://tidal.com/browse/artist/123456789"), None);
+        assert_eq!(parse("https://tidal.com/browse/track/"), None);
+    }
+
+    #[test]
+    fn cleans_youtube_title_noise() {
+        assert_eq!(
+            clean_youtube_title("Song Title (Official Video) [HD] feat. Guest Artist"),
+            "song title"
+        );
+        assert_eq!(clean_youtube_title("Another Song ft Guest"), "another song");
+        assert_eq!(
+            clean_youtube_title("Third Song FEATURING Someone"),
+            "third song"
+        );
+    }
 }

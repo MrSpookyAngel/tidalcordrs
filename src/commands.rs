@@ -59,6 +59,49 @@ fn get_formatted_track(track: &crate::track::Track) -> String {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(title: &str, featured_artists: Vec<&str>, duration: u32) -> crate::track::Track {
+        crate::track::Track {
+            title: title.to_string(),
+            artist: "Main Artist".to_string(),
+            featured_artists: featured_artists.into_iter().map(String::from).collect(),
+            duration,
+            stream_url: "https://example.com/stream".to_string(),
+        }
+    }
+
+    #[test]
+    fn formats_track_without_featured_artists() {
+        assert_eq!(
+            get_formatted_track(&track("Song Title", Vec::new(), 185)),
+            "Main Artist - Song Title (03:05)"
+        );
+    }
+
+    #[test]
+    fn appends_featured_artists_when_title_does_not_include_them() {
+        assert_eq!(
+            get_formatted_track(&track("Song Title", vec!["Guest One", "Guest Two"], 65)),
+            "Main Artist - Song Title ft. Guest One, Guest Two (01:05)"
+        );
+    }
+
+    #[test]
+    fn avoids_duplicate_featured_artists_when_title_already_mentions_them() {
+        assert_eq!(
+            get_formatted_track(&track(
+                "Song Title feat. Guest One",
+                vec!["Guest One"],
+                3661
+            )),
+            "Main Artist - Song Title feat. Guest One (01:01:01)"
+        );
+    }
+}
+
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn ping(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say("Pong!").await?;
