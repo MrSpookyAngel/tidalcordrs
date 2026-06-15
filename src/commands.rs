@@ -150,9 +150,9 @@ pub async fn volume(ctx: Context<'_>, volume: u8) -> Result<(), Error> {
         let handler = handler_lock.lock().await;
 
         // Set the volume
-        handler.queue().current().as_mut().map(|track_handle| {
+        if let Some(track_handle) = handler.queue().current().as_mut() {
             let _ = track_handle.set_volume(volume as f32 / 100.0);
-        });
+        }
 
         ctx.say(format!("Volume set to {}.", volume)).await?;
     } else {
@@ -187,7 +187,7 @@ pub async fn play(
     query_or_url: Option<String>,
 ) -> Result<(), Error> {
     // Attempt to join the voice channel if not already connected
-    if !try_join_voice_channel(ctx.clone()).await? {
+    if !try_join_voice_channel(ctx).await? {
         return Ok(());
     }
 
@@ -230,11 +230,11 @@ pub async fn play(
 
     let _ = ctx.defer().await;
 
-    try_join_voice_channel(ctx.clone()).await?;
+    try_join_voice_channel(ctx).await?;
 
     let mut session = ctx.data().session.lock().await;
 
-    let mut tracks = crate::url_handler::handle_url(&mut *session, &query).await?;
+    let mut tracks = crate::url_handler::handle_url(&mut session, &query).await?;
 
     if tracks.is_empty() {
         tracks = {
@@ -389,7 +389,7 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     if let Some(handler_lock) = manager.get(guild_id) {
         let handler = handler_lock.lock().await;
 
-        if let Some(_) = handler.queue().current() {
+        if handler.queue().current().is_some() {
             // Skip the current song
             let _ = handler.queue().skip();
             ctx.say("Skipped the current track.").await?;
@@ -424,7 +424,7 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
         let handler = handler_lock.lock().await;
 
         // Stop the playback and clear the queue
-        let _ = handler.queue().stop();
+        handler.queue().stop();
 
         ctx.say("Stopped the playback and cleared the queue.")
             .await?;
@@ -495,7 +495,7 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     };
 
     // Get the songbird voice manager
-    if let Some(manager) = songbird::get(&ctx.serenity_context()).await {
+    if let Some(manager) = songbird::get(ctx.serenity_context()).await {
         // Leave the voice channel
         let _ = manager.remove(guild_id).await;
         println!("Left the voice channel. Guild ID: {}", guild_id);

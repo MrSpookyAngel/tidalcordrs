@@ -120,13 +120,13 @@ async fn extract_youtube_metadata(url: &str) -> Result<YouTubeMetadata, Error> {
                 buf.push_str(t.as_str());
 
                 if t.last_in_text_node() {
-                    if buf.contains("var ytInitialData =") {
-                        if let Some(start) = buf.find("var ytInitialData =") {
-                            let json_part = &buf[start + "var ytInitialData =".len()..];
-                            let trimmed = json_part.trim().trim_end_matches(';');
+                    if buf.contains("var ytInitialData =")
+                        && let Some(start) = buf.find("var ytInitialData =")
+                    {
+                        let json_part = &buf[start + "var ytInitialData =".len()..];
+                        let trimmed = json_part.trim().trim_end_matches(';');
 
-                            *json_handle.borrow_mut() = Some(trimmed.to_string());
-                        }
+                        *json_handle.borrow_mut() = Some(trimmed.to_string());
                     }
                     buf.clear();
                 }

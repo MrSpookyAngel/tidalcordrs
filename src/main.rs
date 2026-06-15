@@ -68,14 +68,12 @@ async fn event_handler(
                 };
 
                 // Disconnect if bot is the remaining user in a voice channel after 5 minutes
-                if should_disconnect {
-                    if let Some(manager) = songbird::get(&ctx_clone).await {
-                        let _ = manager.remove(guild_id).await;
-                        println!(
-                            "Left voice channel in guild {} due to 5 minutes of inactivity",
-                            guild_id
-                        );
-                    }
+                if should_disconnect && let Some(manager) = songbird::get(&ctx_clone).await {
+                    let _ = manager.remove(guild_id).await;
+                    println!(
+                        "Left voice channel in guild {} due to 5 minutes of inactivity",
+                        guild_id
+                    );
                 }
             });
         }

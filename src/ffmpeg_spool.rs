@@ -238,10 +238,10 @@ impl Drop for SpoolReader {
             let _ = child.wait();
         }
 
-        if let Ok(mut writer) = self.writer.lock() {
-            if let Some(writer) = writer.take() {
-                let _ = writer.join();
-            }
+        if let Ok(mut writer) = self.writer.lock()
+            && let Some(writer) = writer.take()
+        {
+            let _ = writer.join();
         }
 
         let _ = std::fs::remove_file(&self.path);

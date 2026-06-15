@@ -293,14 +293,12 @@ impl Session {
 
                     self.save_token_to_file(token)?;
 
-                    return Ok(());
+                    Ok(())
                 } else {
-                    return Err("Failed to refresh token".into());
+                    Err("Failed to refresh token".into())
                 }
             }
-            Err(e) => {
-                return Err(format!("Error refreshing token: {}", e).into());
-            }
+            Err(e) => Err(format!("Error refreshing token: {}", e).into()),
         }
     }
 
