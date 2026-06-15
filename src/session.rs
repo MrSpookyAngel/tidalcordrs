@@ -25,8 +25,6 @@ struct SessionResponse {
     _channel_id: u64,
     #[serde(rename = "partnerId")]
     _partner_id: u64,
-    #[serde(rename = "client")]
-    _client: std::collections::HashMap<String, serde_json::Value>,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -36,8 +34,60 @@ struct TokenResponse {
     token_type: String,
     #[serde(rename = "expires_in")]
     _expires_in: u64,
-    #[serde(rename = "user")]
-    _user: std::collections::HashMap<String, serde_json::Value>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct SearchTracksResponse {
+    tracks: TrackItemsResponse,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct TrackItemsResponse {
+    items: Vec<track::TidalTrackResponse>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct CollectionRelationshipsResponse {
+    #[serde(default)]
+    data: Vec<CollectionRelationshipItem>,
+    #[serde(default)]
+    links: CollectionLinks,
+}
+
+#[derive(serde::Deserialize, Debug)]
+struct CollectionRelationshipItem {
+    #[serde(rename = "type")]
+    item_type: String,
+    id: String,
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+struct CollectionLinks {
+    next: Option<String>,
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(untagged)]
+enum LegacyCollectionTrackItem {
+    Wrapped { item: track::TidalTrackResponse },
+    Direct(track::TidalTrackResponse),
+}
+
+impl LegacyCollectionTrackItem {
+    fn into_track_response(self) -> track::TidalTrackResponse {
+        match self {
+            Self::Wrapped { item } => item,
+            Self::Direct(item) => item,
+        }
+    }
+}
+
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct LegacyCollectionTracksPage {
+    items: Vec<LegacyCollectionTrackItem>,
+    total_number_of_items: Option<u64>,
+    total: Option<u64>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -393,14 +443,8 @@ impl Session {
         Ok(())
     }
 
-    async fn search(
-        &self,
-        query: &str,
-        search_types: Option<&str>,
-        limit: u32,
-    ) -> Result<serde_json::Value, Error> {
+    async fn search_tracks(&self, query: &str, limit: u32) -> Result<SearchTracksResponse, Error> {
         let limit = limit.to_string();
-        let search_types = search_types.unwrap_or("artists,albums,playlists,tracks,videos");
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("User-Agent", self.config.user_agent.parse()?);
@@ -415,7 +459,7 @@ impl Session {
         params.insert("limit", &limit);
         params.insert("countryCode", &self.country_code);
         params.insert("offset", "0");
-        params.insert("types", search_types);
+        params.insert("types", "tracks");
 
         let response = self
             .client
@@ -426,23 +470,7 @@ impl Session {
             .await;
 
         match response {
-            Ok(resp) if resp.status().is_success() => {
-                let text = resp.text().await?;
-                let json: serde_json::Value = text.parse()?;
-
-                if let serde_json::Value::Object(ref map) = json {
-                    let mut filtered = serde_json::Map::new();
-                    for key in search_types.split(',') {
-                        let key = key.trim();
-                        if let Some(v) = map.get(key) {
-                            filtered.insert(key.to_string(), v.clone());
-                        }
-                    }
-                    return Ok(serde_json::Value::Object(filtered));
-                }
-
-                Err("Search response was not a JSON object".into())
-            }
+            Ok(resp) if resp.status().is_success() => Ok(resp.json().await?),
             Ok(resp) => Err(format!("Search failed with status: {}", resp.status()).into()),
             Err(e) => {
                 println!("Please check your access token and network connection.");
@@ -451,7 +479,7 @@ impl Session {
         }
     }
 
-    async fn get_track_response(&self, track_id: &str) -> Result<serde_json::Value, Error> {
+    async fn get_track_response(&self, track_id: &str) -> Result<track::TidalTrackResponse, Error> {
         let url = format!("https://api.tidal.com/v1/tracks/{}", track_id);
         let params = [
             ("sessionId", self.session_id.as_str()),
@@ -516,31 +544,23 @@ impl Session {
                 .send()
                 .await?
                 .error_for_status()?;
-            let json = response.json::<serde_json::Value>().await?;
+            let page = response.json::<CollectionRelationshipsResponse>().await?;
 
-            if let Some(items) = json.get("data").and_then(|value| value.as_array()) {
-                track_ids.extend(items.iter().filter_map(|item| {
-                    if item.get("type").and_then(|value| value.as_str()) == Some("tracks") {
-                        item.get("id")
-                            .and_then(|value| value.as_str())
-                            .map(String::from)
-                    } else {
-                        None
-                    }
-                }));
-            }
+            track_ids.extend(page.data.into_iter().filter_map(|item| {
+                if item.item_type == "tracks" {
+                    Some(item.id)
+                } else {
+                    None
+                }
+            }));
 
-            next_url = json
-                .pointer("/links/next")
-                .and_then(|value| value.as_str())
-                .filter(|link| !link.is_empty())
-                .map(|link| {
-                    if link.starts_with("http") {
-                        link.to_string()
-                    } else {
-                        format!("https://openapi.tidal.com/v2{}", link)
-                    }
-                });
+            next_url = page.links.next.filter(|link| !link.is_empty()).map(|link| {
+                if link.starts_with("http") {
+                    link
+                } else {
+                    format!("https://openapi.tidal.com/v2{}", link)
+                }
+            });
         }
 
         Ok(track_ids)
@@ -552,7 +572,7 @@ impl Session {
         collection_id: &str,
         limit: u32,
         offset: u32,
-    ) -> Result<serde_json::Value, Error> {
+    ) -> Result<LegacyCollectionTracksPage, Error> {
         let url = format!(
             "https://api.tidal.com/v1/{}/{}/tracks",
             collection_type, collection_id
@@ -608,26 +628,19 @@ impl Session {
             }
 
             let page = page?;
-            let items = page
-                .get("items")
-                .and_then(|value| value.as_array())
-                .ok_or("No items found in collection")?;
+            let item_count = page.items.len();
 
-            if items.is_empty() {
+            if page.items.is_empty() {
                 break;
             }
 
-            for item in items {
-                let track_response = item.get("item").unwrap_or(item);
-                if track_response
-                    .get("type")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|item_type| item_type.eq_ignore_ascii_case("video"))
-                {
+            for item in page.items {
+                let track_response = item.into_track_response();
+                if track_response.is_video() {
                     continue;
                 }
 
-                match track::Track::from_track_id(self, track_response).await {
+                match track::Track::from_track_id(self, &track_response).await {
                     Ok(track) => tracks.push(track),
                     Err(error) => {
                         println!("Skipping collection track: {}", error);
@@ -635,14 +648,11 @@ impl Session {
                 }
             }
 
-            offset += items.len() as u32;
+            offset += item_count as u32;
 
-            let total = page
-                .get("totalNumberOfItems")
-                .or_else(|| page.get("total"))
-                .and_then(|value| value.as_u64());
+            let total = page.total_number_of_items.or(page.total);
 
-            if items.len() < limit as usize || total.is_some_and(|total| offset as u64 >= total) {
+            if item_count < limit as usize || total.is_some_and(|total| offset as u64 >= total) {
                 break;
             }
         }
@@ -701,8 +711,8 @@ impl Session {
             this: &crate::session::Session,
             query: &str,
             limit: u32,
-        ) -> Result<serde_json::Value, Error> {
-            let res = this.search(query, Some("tracks"), limit).await?;
+        ) -> Result<SearchTracksResponse, Error> {
+            let res = this.search_tracks(query, limit).await?;
             Ok(res)
         }
 
@@ -714,19 +724,11 @@ impl Session {
             search_result = try_search(self, query, limit).await;
         }
 
-        let search_result = search_result?;
-
-        let items = search_result
-            .get("tracks")
-            .ok_or("No tracks found")?
-            .get("items")
-            .ok_or("No items found in tracks")?
-            .as_array()
-            .ok_or("Expected an array of track items")?;
+        let items = search_result?.tracks.items;
 
         let mut tracks = Vec::with_capacity(items.len());
 
-        for item in items {
+        for item in &items {
             let track = track::Track::from_track_id(self, item).await?;
             tracks.push(track);
         }
@@ -752,5 +754,122 @@ impl Session {
         let mut tracks = self.find_tracks(&full_query, 1).await?;
 
         Ok(tracks.pop())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserializes_search_tracks_response() {
+        let response: SearchTracksResponse = serde_json::from_str(
+            r#"{
+                "tracks": {
+                    "items": [
+                        {
+                            "id": 123,
+                            "title": "First Track",
+                            "artists": [{"name": "First Artist"}],
+                            "duration": 180
+                        },
+                        {
+                            "id": "456",
+                            "title": "Second Track",
+                            "artists": [{"name": "Second Artist"}],
+                            "duration": 240
+                        }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.tracks.items.len(), 2);
+        assert_eq!(response.tracks.items[0].id(), "123");
+        assert_eq!(response.tracks.items[1].id(), "456");
+    }
+
+    #[test]
+    fn deserializes_collection_relationships_response() {
+        let response: CollectionRelationshipsResponse = serde_json::from_str(
+            r#"{
+                "data": [
+                    {"type": "tracks", "id": "track-one"},
+                    {"type": "videos", "id": "video-one"}
+                ],
+                "links": {
+                    "next": "/playlists/abc/relationships/items?page[cursor]=next"
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let track_ids = response
+            .data
+            .into_iter()
+            .filter_map(|item| (item.item_type == "tracks").then_some(item.id))
+            .collect::<Vec<_>>();
+
+        assert_eq!(track_ids, vec!["track-one".to_string()]);
+        assert_eq!(
+            response.links.next.as_deref(),
+            Some("/playlists/abc/relationships/items?page[cursor]=next")
+        );
+    }
+
+    #[test]
+    fn deserializes_empty_collection_links() {
+        let response: CollectionRelationshipsResponse = serde_json::from_str(
+            r#"{
+                "data": [
+                    {"type": "tracks", "id": "track-one"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(response.data.len(), 1);
+        assert_eq!(response.links.next, None);
+    }
+
+    #[test]
+    fn deserializes_legacy_collection_wrapped_and_direct_items() {
+        let page: LegacyCollectionTracksPage = serde_json::from_str(
+            r#"{
+                "items": [
+                    {
+                        "item": {
+                            "id": 123,
+                            "title": "Wrapped Track",
+                            "artists": [{"name": "Wrapped Artist"}],
+                            "duration": 180
+                        }
+                    },
+                    {
+                        "id": "456",
+                        "title": "Direct Track",
+                        "artists": [{"name": "Direct Artist"}],
+                        "duration": 240,
+                        "type": "video"
+                    }
+                ],
+                "totalNumberOfItems": 2
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.total_number_of_items, Some(2));
+        assert_eq!(page.total, None);
+
+        let mut items = page.items.into_iter();
+        let wrapped = items.next().unwrap().into_track_response();
+        let direct = items.next().unwrap().into_track_response();
+
+        assert_eq!(wrapped.id(), "123");
+        assert!(!wrapped.is_video());
+        assert_eq!(direct.id(), "456");
+        assert!(direct.is_video());
     }
 }
