@@ -9,6 +9,8 @@ pub struct Data {
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
+const QUEUE_PAGE_SIZE: usize = 10;
+
 struct TrackErrorNotifier;
 
 #[serenity::async_trait]
@@ -79,7 +81,8 @@ fn help_message(prefix: &str) -> String {
             "`/stop` or `{0}stop` (`{0}clear`) - Stop playback and clear the queue.\n",
             "`/current` or `{0}current` (`{0}currentplaying`, `{0}now`, `{0}nowplaying`, `{0}playing`, `{0}np`) - Show the current track.\n",
             "`/leave` or `{0}leave` (`{0}disconnect`) - Disconnect from voice.\n",
-            "`/queue` or `{0}queue` (`{0}q`, `{0}list`, `{0}l`) - Show the current queue."
+            "`/queue` or `{0}queue` (`{0}q`, `{0}list`, `{0}l`) - Show the current queue.\n",
+            "`{0}queue page <n>` - Show a later queue page."
         ),
         prefix
     )
@@ -199,6 +202,39 @@ mod tests {
         move_appended_tracks_next(&mut values, 2);
 
         assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parses_queue_page_requests() {
+        assert_eq!(parse_queue_page_request(None), Ok(1));
+        assert_eq!(parse_queue_page_request(Some("2")), Ok(2));
+        assert_eq!(parse_queue_page_request(Some("page 3")), Ok(3));
+    }
+
+    #[test]
+    fn rejects_invalid_queue_page_requests() {
+        assert_eq!(
+            parse_queue_page_request(Some("page 0")),
+            Err("Page number must be at least 1.".to_string())
+        );
+        assert_eq!(
+            parse_queue_page_request(Some("later please")),
+            Err("Use `queue`, `queue <page>`, or `queue page <page>`.".to_string())
+        );
+    }
+
+    #[test]
+    fn computes_queue_page_bounds() {
+        assert_eq!(queue_page_bounds(23, 1), Ok((0, 10, 3)));
+        assert_eq!(queue_page_bounds(23, 3), Ok((20, 23, 3)));
+    }
+
+    #[test]
+    fn rejects_queue_page_out_of_range() {
+        assert_eq!(
+            queue_page_bounds(5, 2),
+            Err("That page is outside the queue. There is only 1 page available.".to_string())
+        );
     }
 }
 
@@ -399,6 +435,97 @@ fn move_appended_tracks_next<T>(queue: &mut [T], inserted_count: usize) {
     }
 
     up_next.rotate_right(inserted_count);
+}
+
+fn parse_queue_page_request(page: Option<&str>) -> Result<usize, String> {
+    let Some(page) = page.map(str::trim).filter(|page| !page.is_empty()) else {
+        return Ok(1);
+    };
+
+    let raw_page = if let Some(page) = page.strip_prefix("page ") {
+        page.trim()
+    } else {
+        page
+    };
+
+    let page_number = raw_page
+        .parse::<usize>()
+        .map_err(|_| "Use `queue`, `queue <page>`, or `queue page <page>`.".to_string())?;
+
+    if page_number == 0 {
+        return Err("Page number must be at least 1.".to_string());
+    }
+
+    Ok(page_number)
+}
+
+fn queue_page_bounds(up_next_count: usize, page: usize) -> Result<(usize, usize, usize), String> {
+    let total_pages = up_next_count.div_ceil(QUEUE_PAGE_SIZE);
+    if total_pages == 0 {
+        return Ok((0, 0, 0));
+    }
+
+    if page > total_pages {
+        return Err(format!(
+            "That page is outside the queue. There {} only {} page{} available.",
+            if total_pages == 1 { "is" } else { "are" },
+            total_pages,
+            if total_pages == 1 { "" } else { "s" }
+        ));
+    }
+
+    let start = (page - 1) * QUEUE_PAGE_SIZE;
+    let end = std::cmp::min(start + QUEUE_PAGE_SIZE, up_next_count);
+
+    Ok((start, end, total_pages))
+}
+
+fn format_queue_message(
+    queue: &[songbird::tracks::TrackHandle],
+    page: usize,
+) -> Result<String, String> {
+    if queue.is_empty() {
+        return Ok("The queue is currently empty.".to_string());
+    }
+
+    let mut message = String::new();
+
+    if let Some(current) = queue.first() {
+        let track_data = current.data::<crate::track::Track>();
+        message.push_str(&format!(
+            "**Now Playing:**\n> {}\n\n",
+            get_formatted_track(&track_data)
+        ));
+    }
+
+    let up_next = &queue[1..];
+    if up_next.is_empty() {
+        message.push_str("_No more tracks in the queue._");
+        return Ok(message);
+    }
+
+    let (start, end, total_pages) = queue_page_bounds(up_next.len(), page)?;
+    message.push_str(&format!("**Up Next (Page {page}/{total_pages}):**\n"));
+
+    for (offset, track_handle) in up_next.iter().skip(start).take(end - start).enumerate() {
+        let track_data = track_handle.data::<crate::track::Track>();
+        message.push_str(&format!(
+            "{}. {}\n",
+            start + offset + 1,
+            get_formatted_track(&track_data)
+        ));
+    }
+
+    if total_pages > 1 {
+        message.push_str(&format!(
+            "\n*Showing tracks {}-{} of {} queued tracks.*",
+            start + 1,
+            end,
+            up_next.len()
+        ));
+    }
+
+    Ok(message)
 }
 
 /// Join the voice channel you are currently in.
@@ -883,58 +1010,30 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
 
 /// Show the current queue and what is up next.
 #[poise::command(slash_command, prefix_command, aliases("q", "list", "l"), guild_only)]
-pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
+pub async fn queue(
+    ctx: Context<'_>,
+    #[description = "Optional page number, or use `page 2` in prefix commands"]
+    #[rest]
+    page: Option<String>,
+) -> Result<(), Error> {
     let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
         return Ok(());
     };
     let handler = handler_lock.lock().await;
 
     let queue = handler.queue().current_queue();
-
-    if queue.is_empty() {
-        ctx.say("The queue is currently empty.").await?;
-        return Ok(());
-    }
-
-    let mut message = String::new();
-
-    // Current track
-    if let Some(current) = queue.first() {
-        let track_data = current.data::<crate::track::Track>();
-        message.push_str(&format!(
-            "**Now Playing:**\n> {}\n\n",
-            get_formatted_track(&track_data)
-        ));
-    }
-
-    // Next {tracks_to_show} tracks
-    let tracks_to_show = 10;
-
-    if queue.len() > 1 {
-        message.push_str("**Up Next:**\n");
-
-        // Retrieve the next {tracks_to_show} number of tracks
-        for (i, track_handle) in queue.iter().skip(1).take(tracks_to_show).enumerate() {
-            let track_data = track_handle.data::<crate::track::Track>();
-            message.push_str(&format!(
-                "{}. {}\n",
-                i + 1,
-                get_formatted_track(&track_data)
-            ));
+    let page = match parse_queue_page_request(page.as_deref()) {
+        Ok(page) => page,
+        Err(message) => {
+            ctx.say(message).await?;
+            return Ok(());
         }
+    };
 
-        // Show queue length if greater than {tracks_to_show} + 1 (current song)
-        if queue.len() > (tracks_to_show + 1) {
-            message.push_str(&format!(
-                "\n*...and {} more tracks in the queue*",
-                queue.len() - (tracks_to_show + 1)
-            ));
-        }
-    } else {
-        message.push_str("_No more tracks in the queue._");
-    }
-
-    ctx.say(message).await?;
+    match format_queue_message(&queue, page) {
+        Ok(message) => ctx.say(message).await?,
+        Err(message) => ctx.say(message).await?,
+    };
 
     Ok(())
 }
