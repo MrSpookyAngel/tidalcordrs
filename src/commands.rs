@@ -73,6 +73,7 @@ fn help_message(prefix: &str) -> String {
             "`/pause` or `{0}pause` (`{0}wait`) - Pause the current track.\n",
             "`/resume` or `{0}resume` (`{0}unpause`, `{0}continue`) - Resume playback.\n",
             "`/skip` or `{0}skip` (`{0}s`, `{0}next`) - Skip the current track.\n",
+            "`/playnext <query-or-url>` or `{0}playnext <query-or-url>` - Insert a song, album, playlist, Tidal URL, or supported YouTube URL right after the current track.\n",
             "`/shuffle` or `{0}shuffle` - Shuffle the queued tracks.\n",
             "`/remove <position>` or `{0}remove <position>` (`{0}delete <position>`) - Remove a queued track by its position in `queue`. Position `1` is the next track.\n",
             "`/stop` or `{0}stop` (`{0}clear`) - Stop playback and clear the queue.\n",
@@ -180,6 +181,24 @@ mod tests {
         assert!(!can_shuffle_queue(1));
         assert!(!can_shuffle_queue(2));
         assert!(can_shuffle_queue(3));
+    }
+
+    #[test]
+    fn move_appended_tracks_next_places_new_tracks_after_current() {
+        let mut values = vec![1, 2, 3, 4, 5, 6];
+
+        move_appended_tracks_next(&mut values, 2);
+
+        assert_eq!(values, vec![1, 5, 6, 2, 3, 4]);
+    }
+
+    #[test]
+    fn move_appended_tracks_next_preserves_order_when_only_new_tracks_follow_current() {
+        let mut values = vec![1, 2, 3];
+
+        move_appended_tracks_next(&mut values, 2);
+
+        assert_eq!(values, vec![1, 2, 3]);
     }
 }
 
@@ -369,6 +388,19 @@ fn shuffle_up_next<T>(queue: &mut [T], rng: &mut fastrand::Rng) {
     }
 }
 
+fn move_appended_tracks_next<T>(queue: &mut [T], inserted_count: usize) {
+    if inserted_count == 0 || queue.len() <= 1 {
+        return;
+    }
+
+    let up_next = &mut queue[1..];
+    if inserted_count > up_next.len() {
+        return;
+    }
+
+    up_next.rotate_right(inserted_count);
+}
+
 /// Join the voice channel you are currently in.
 #[poise::command(
     slash_command,
@@ -428,7 +460,7 @@ async fn enqueue_track(
     ctx: &Context<'_>,
     handler: &mut songbird::Call,
     track: &crate::track::Track,
-) -> Result<(), Error> {
+) -> Result<songbird::tracks::TrackHandle, Error> {
     let stream = songbird::input::Input::Lazy(Box::new(crate::ffmpeg_spool::FfmpegStream::new(
         &track.stream_url,
         ctx.data().spool_read_ahead_bytes,
@@ -436,9 +468,40 @@ async fn enqueue_track(
     let data = std::sync::Arc::new(track.clone());
     let songbird_track = songbird::tracks::Track::new_with_data(stream, data);
 
-    let _ = handler.enqueue(songbird_track).await;
+    let handle = handler.enqueue(songbird_track).await;
 
-    Ok(())
+    Ok(handle)
+}
+
+async fn find_tracks_for_query(
+    ctx: &Context<'_>,
+    query: &str,
+) -> Result<Vec<crate::track::Track>, Error> {
+    let mut session = ctx.data().session.lock().await;
+
+    let mut tracks = crate::url_handler::handle_url(
+        &mut session,
+        query,
+        ctx.data().collection_track_fetch_concurrency,
+    )
+    .await?;
+
+    if tracks.is_empty() {
+        tracks = {
+            let tracks = session
+                .find_tracks(query, 1)
+                .await
+                .map_err(|e| Error::from(e.to_string()))?;
+
+            if tracks.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            tracks
+        };
+    }
+
+    Ok(tracks)
 }
 
 /// Queue a track from a search query or supported URL.
@@ -480,37 +543,17 @@ pub async fn play(
 
     let _ = ctx.defer().await;
 
-    let mut session = ctx.data().session.lock().await;
-
-    let mut tracks = crate::url_handler::handle_url(
-        &mut session,
-        &query,
-        ctx.data().collection_track_fetch_concurrency,
-    )
-    .await?;
-
+    let tracks = find_tracks_for_query(&ctx, &query).await?;
     if tracks.is_empty() {
-        tracks = {
-            let tracks = session
-                .find_tracks(&query, 1)
-                .await
-                .map_err(|e| Error::from(e.to_string()))?;
-
-            if tracks.is_empty() {
-                ctx.say("No track was found on Tidal.").await?;
-                return Ok(());
-            }
-
-            tracks
-        };
+        ctx.say("No track was found on Tidal.").await?;
+        return Ok(());
     }
-    drop(session);
 
     if let Some(handler_lock) = manager.get(guild_id) {
         let mut handler = handler_lock.lock().await;
 
         for track in &tracks {
-            enqueue_track(&ctx, &mut handler, track).await?;
+            let _ = enqueue_track(&ctx, &mut handler, track).await?;
         }
 
         if tracks.len() == 1 {
@@ -538,6 +581,109 @@ pub async fn play(
                 query = %query,
                 "Queued multiple tracks"
             );
+            ctx.say(format!(
+                "{} added **{} tracks** to the queue.",
+                ctx.author().name,
+                tracks.len()
+            ))
+            .await?;
+        }
+    } else {
+        ctx.say("Not connected to a voice channel.").await?;
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+/// Insert a track from a search query or supported URL right after the current track.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn playnext(
+    ctx: Context<'_>,
+    #[description = "Provide the query or url of a song"]
+    #[rest]
+    query_or_url: String,
+) -> Result<(), Error> {
+    if try_join_voice_channel(ctx).await?.is_none() {
+        return Ok(());
+    }
+
+    let Some((guild_id, manager)) = guild_voice_manager(ctx).await? else {
+        return Ok(());
+    };
+
+    let query = query_or_url;
+    tracing::info!(
+        guild_id = %guild_id,
+        user_id = %ctx.author().id,
+        user = %ctx.author().name,
+        query = %query,
+        "User playnext search"
+    );
+
+    let _ = ctx.defer().await;
+
+    let tracks = find_tracks_for_query(&ctx, &query).await?;
+    if tracks.is_empty() {
+        ctx.say("No track was found on Tidal.").await?;
+        return Ok(());
+    }
+
+    if let Some(handler_lock) = manager.get(guild_id) {
+        let mut handler = handler_lock.lock().await;
+        let had_existing_queue = !handler.queue().is_empty();
+
+        for track in &tracks {
+            let _ = enqueue_track(&ctx, &mut handler, track).await?;
+        }
+
+        if had_existing_queue {
+            handler.queue().modify_queue(|queue| {
+                move_appended_tracks_next(queue.make_contiguous(), tracks.len());
+            });
+        }
+
+        if had_existing_queue {
+            if tracks.len() == 1 {
+                tracing::info!(
+                    guild_id = %guild_id,
+                    user_id = %ctx.author().id,
+                    user = %ctx.author().name,
+                    artist = %tracks[0].artist,
+                    title = %tracks[0].title,
+                    duration_seconds = tracks[0].duration,
+                    "Queued track to play next"
+                );
+                ctx.say(format!(
+                    "{} added **{}** to play next.",
+                    ctx.author().name,
+                    get_formatted_track(&tracks[0])
+                ))
+                .await?;
+            } else {
+                tracing::info!(
+                    guild_id = %guild_id,
+                    user_id = %ctx.author().id,
+                    user = %ctx.author().name,
+                    track_count = tracks.len(),
+                    query = %query,
+                    "Queued multiple tracks to play next"
+                );
+                ctx.say(format!(
+                    "{} added **{} tracks** to play next.",
+                    ctx.author().name,
+                    tracks.len()
+                ))
+                .await?;
+            }
+        } else if tracks.len() == 1 {
+            ctx.say(format!(
+                "{} started playing **{}**.",
+                ctx.author().name,
+                get_formatted_track(&tracks[0])
+            ))
+            .await?;
+        } else {
             ctx.say(format!(
                 "{} added **{} tracks** to the queue.",
                 ctx.author().name,
