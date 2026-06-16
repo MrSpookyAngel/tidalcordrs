@@ -9,12 +9,31 @@ pub struct Data {
     pub command_prefix: String,
     pub repeat_modes:
         std::sync::Arc<tokio::sync::Mutex<HashMap<serenity::model::id::GuildId, RepeatMode>>>,
+    pub playback_status: std::sync::Arc<tokio::sync::Mutex<PlaybackStatusState>>,
 }
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
 const QUEUE_PAGE_SIZE: usize = 10;
 const TRACK_INFO_TIMEOUT: Duration = Duration::from_secs(2);
+const ACTIVITY_NAME_MAX_CHARS: usize = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlaybackStatusKind {
+    Playing,
+    Paused,
+}
+
+#[derive(Clone, Debug)]
+struct PlaybackStatus {
+    guild_id: serenity::model::id::GuildId,
+    track_uuid: String,
+}
+
+#[derive(Default, Debug)]
+pub struct PlaybackStatusState {
+    current: Option<PlaybackStatus>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, poise::ChoiceParameter)]
 pub enum RepeatMode {
@@ -62,6 +81,8 @@ struct RepeatModeNotifier {
     handler_lock: std::sync::Arc<tokio::sync::Mutex<songbird::Call>>,
     repeat_modes:
         std::sync::Arc<tokio::sync::Mutex<HashMap<serenity::model::id::GuildId, RepeatMode>>>,
+    serenity_context: serenity::client::Context,
+    playback_status: std::sync::Arc<tokio::sync::Mutex<PlaybackStatusState>>,
     guild_id: serenity::model::id::GuildId,
     spool_read_ahead_bytes: u64,
 }
@@ -94,7 +115,7 @@ impl songbird::events::EventHandler for RepeatModeNotifier {
                     (RepeatMode::Queue, PlayMode::End) => {
                         let track = handle.data::<crate::track::Track>();
                         let mut handler = self.handler_lock.lock().await;
-                        if let Err(error) = enqueue_track_with_spool(
+                        match enqueue_track_with_spool(
                             &mut handler,
                             &track,
                             Duration::ZERO,
@@ -102,8 +123,73 @@ impl songbird::events::EventHandler for RepeatModeNotifier {
                         )
                         .await
                         {
-                            tracing::warn!(%error, "Failed to requeue track for queue repeat");
+                            Ok(new_handle) => {
+                                begin_playback_status(
+                                    &self.serenity_context,
+                                    self.playback_status.clone(),
+                                    self.guild_id,
+                                    new_handle,
+                                )
+                                .await;
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "Failed to requeue track for queue repeat");
+                            }
                         }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        None
+    }
+}
+
+struct PlaybackStatusNotifier {
+    serenity_context: serenity::client::Context,
+    playback_status: std::sync::Arc<tokio::sync::Mutex<PlaybackStatusState>>,
+    guild_id: serenity::model::id::GuildId,
+}
+
+#[serenity::async_trait]
+impl songbird::events::EventHandler for PlaybackStatusNotifier {
+    async fn act(
+        &self,
+        ctx: &songbird::events::EventContext<'_>,
+    ) -> Option<songbird::events::Event> {
+        if let songbird::events::EventContext::Track(track_list) = ctx {
+            for (state, handle) in *track_list {
+                let track_uuid = handle.uuid().to_string();
+                match &state.playing {
+                    PlayMode::Play => {
+                        begin_playback_status(
+                            &self.serenity_context,
+                            self.playback_status.clone(),
+                            self.guild_id,
+                            (*handle).clone(),
+                        )
+                        .await;
+                    }
+                    PlayMode::Pause => {
+                        update_playback_status_for_track(
+                            &self.serenity_context,
+                            self.playback_status.clone(),
+                            self.guild_id,
+                            &track_uuid,
+                            handle,
+                            PlaybackStatusKind::Paused,
+                        )
+                        .await;
+                    }
+                    PlayMode::End | PlayMode::Stop | PlayMode::Errored(_) => {
+                        clear_playback_status_for_track(
+                            &self.serenity_context,
+                            self.playback_status.clone(),
+                            self.guild_id,
+                            &track_uuid,
+                        )
+                        .await;
                     }
                     _ => {}
                 }
@@ -174,6 +260,121 @@ fn format_duration_seconds(total_seconds: u64) -> String {
         format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
     } else {
         format!("{:02}:{:02}", minutes, seconds)
+    }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let mut truncated = value.chars().take(max_chars - 3).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn playback_status_name(track: &crate::track::Track, kind: PlaybackStatusKind) -> String {
+    let emoji = match kind {
+        PlaybackStatusKind::Playing => "▶️",
+        PlaybackStatusKind::Paused => "⏸️",
+    };
+
+    truncate_chars(
+        &format!("{} {} - {}", emoji, track.artist, track.title),
+        ACTIVITY_NAME_MAX_CHARS,
+    )
+}
+
+async fn begin_playback_status(
+    serenity_context: &serenity::client::Context,
+    playback_status: std::sync::Arc<tokio::sync::Mutex<PlaybackStatusState>>,
+    guild_id: serenity::model::id::GuildId,
+    track_handle: songbird::tracks::TrackHandle,
+) {
+    let track = track_handle.data::<crate::track::Track>().clone();
+    let track_uuid = track_handle.uuid().to_string();
+    {
+        let mut status = playback_status.lock().await;
+        status.current = Some(PlaybackStatus {
+            guild_id,
+            track_uuid,
+        });
+    }
+
+    serenity_context.set_activity(Some(serenity::gateway::ActivityData::listening(
+        playback_status_name(&track, PlaybackStatusKind::Playing),
+    )));
+}
+
+async fn update_playback_status_for_track(
+    serenity_context: &serenity::client::Context,
+    playback_status: std::sync::Arc<tokio::sync::Mutex<PlaybackStatusState>>,
+    guild_id: serenity::model::id::GuildId,
+    track_uuid: &str,
+    track_handle: &songbird::tracks::TrackHandle,
+    kind: PlaybackStatusKind,
+) {
+    let should_update = {
+        let status = playback_status.lock().await;
+        status
+            .current
+            .as_ref()
+            .is_some_and(|current| current.guild_id == guild_id && current.track_uuid == track_uuid)
+    };
+
+    if should_update {
+        let track = track_handle.data::<crate::track::Track>();
+        serenity_context.set_activity(Some(serenity::gateway::ActivityData::listening(
+            playback_status_name(&track, kind),
+        )));
+    }
+}
+
+async fn clear_playback_status_for_track(
+    serenity_context: &serenity::client::Context,
+    playback_status: std::sync::Arc<tokio::sync::Mutex<PlaybackStatusState>>,
+    guild_id: serenity::model::id::GuildId,
+    track_uuid: &str,
+) {
+    let should_clear = {
+        let mut status = playback_status.lock().await;
+        let should_clear = status.current.as_ref().is_some_and(|current| {
+            current.guild_id == guild_id && current.track_uuid == track_uuid
+        });
+        if should_clear {
+            status.current = None;
+        }
+        should_clear
+    };
+
+    if should_clear {
+        serenity_context.set_activity(None);
+    }
+}
+
+pub async fn clear_playback_status_for_guild(
+    serenity_context: &serenity::client::Context,
+    playback_status: std::sync::Arc<tokio::sync::Mutex<PlaybackStatusState>>,
+    guild_id: serenity::model::id::GuildId,
+) {
+    let should_clear = {
+        let mut status = playback_status.lock().await;
+        let should_clear = status
+            .current
+            .as_ref()
+            .is_some_and(|current| current.guild_id == guild_id);
+        if should_clear {
+            status.current = None;
+        }
+        should_clear
+    };
+
+    if should_clear {
+        serenity_context.set_activity(None);
     }
 }
 
@@ -300,6 +501,35 @@ mod tests {
             )),
             "Main Artist - Song Title feat. Guest One (01:01:01)"
         );
+    }
+
+    #[test]
+    fn formats_playback_status_with_current_track() {
+        assert_eq!(
+            playback_status_name(
+                &track("Song Title", Vec::new(), 185),
+                PlaybackStatusKind::Playing
+            ),
+            "▶️ Main Artist - Song Title"
+        );
+        assert_eq!(
+            playback_status_name(
+                &track("Song Title", Vec::new(), 185),
+                PlaybackStatusKind::Paused
+            ),
+            "⏸️ Main Artist - Song Title"
+        );
+    }
+
+    #[test]
+    fn truncates_playback_status() {
+        let status = playback_status_name(
+            &track(&"A".repeat(200), Vec::new(), 185),
+            PlaybackStatusKind::Playing,
+        );
+
+        assert!(status.chars().count() <= ACTIVITY_NAME_MAX_CHARS);
+        assert!(status.ends_with("..."));
     }
 
     #[test]
@@ -557,6 +787,8 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<Option<JoinVoiceChan
     // Join (or move to) the voice channel
     if let Ok(handler_lock) = manager.join(guild_id, channel_id).await {
         let repeat_handler_lock = handler_lock.clone();
+        let serenity_context = ctx.serenity_context().clone();
+        let playback_status = ctx.data().playback_status.clone();
         let mut handler = handler_lock.lock().await;
         handler.add_global_event(
             songbird::events::TrackEvent::Error.into(),
@@ -567,6 +799,8 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<Option<JoinVoiceChan
             RepeatModeNotifier {
                 handler_lock: repeat_handler_lock.clone(),
                 repeat_modes: ctx.data().repeat_modes.clone(),
+                serenity_context: serenity_context.clone(),
+                playback_status: playback_status.clone(),
                 guild_id,
                 spool_read_ahead_bytes: ctx.data().spool_read_ahead_bytes,
             },
@@ -576,10 +810,27 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<Option<JoinVoiceChan
             RepeatModeNotifier {
                 handler_lock: repeat_handler_lock,
                 repeat_modes: ctx.data().repeat_modes.clone(),
+                serenity_context: serenity_context.clone(),
+                playback_status: playback_status.clone(),
                 guild_id,
                 spool_read_ahead_bytes: ctx.data().spool_read_ahead_bytes,
             },
         );
+        for event in [
+            songbird::events::TrackEvent::Play,
+            songbird::events::TrackEvent::Pause,
+            songbird::events::TrackEvent::End,
+            songbird::events::TrackEvent::Error,
+        ] {
+            handler.add_global_event(
+                event.into(),
+                PlaybackStatusNotifier {
+                    serenity_context: serenity_context.clone(),
+                    playback_status: playback_status.clone(),
+                    guild_id,
+                },
+            );
+        }
         Ok(Some(JoinVoiceChannelState::Joined))
     } else {
         ctx.say("Failed to join the voice channel.").await?;
@@ -888,13 +1139,26 @@ async fn enqueue_track_at(
     track: &crate::track::Track,
     start_position: Duration,
 ) -> Result<songbird::tracks::TrackHandle, Error> {
-    enqueue_track_with_spool(
+    let was_queue_empty = handler.queue().len() == 0;
+    let handle = enqueue_track_with_spool(
         handler,
         track,
         start_position,
         ctx.data().spool_read_ahead_bytes,
     )
-    .await
+    .await?;
+
+    if was_queue_empty && let Some(guild_id) = ctx.guild_id() {
+        begin_playback_status(
+            ctx.serenity_context(),
+            ctx.data().playback_status.clone(),
+            guild_id,
+            handle.clone(),
+        )
+        .await;
+    }
+
+    Ok(handle)
 }
 
 async fn enqueue_track_with_spool(
@@ -1166,12 +1430,31 @@ pub async fn repeat(
 /// Pause the current playback.
 #[poise::command(slash_command, prefix_command, aliases("wait"), guild_only)]
 pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(guild_id) = guild_id(ctx).await? else {
+        return Ok(());
+    };
     let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
         return Ok(());
     };
     let handler = handler_lock.lock().await;
 
-    ctx.say(pause_playback_message(&handler).await?).await?;
+    let response = pause_playback_message(&handler).await?;
+    if response == "Paused the playback."
+        && let Some(track_handle) = handler.queue().current()
+    {
+        let track_uuid = track_handle.uuid().to_string();
+        update_playback_status_for_track(
+            ctx.serenity_context(),
+            ctx.data().playback_status.clone(),
+            guild_id,
+            &track_uuid,
+            &track_handle,
+            PlaybackStatusKind::Paused,
+        )
+        .await;
+    }
+
+    ctx.say(response).await?;
 
     Ok(())
 }
@@ -1184,11 +1467,27 @@ pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
     guild_only
 )]
 pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(guild_id) = guild_id(ctx).await? else {
+        return Ok(());
+    };
     let Some(handler_lock) = voice_call(ctx, "I'm not in a voice channel.").await? else {
         return Ok(());
     };
     let handler = handler_lock.lock().await;
-    ctx.say(resume_playback_message(&handler).await?).await?;
+    let response = resume_playback_message(&handler).await?;
+    if response == "Resumed the playback."
+        && let Some(track_handle) = handler.queue().current()
+    {
+        begin_playback_status(
+            ctx.serenity_context(),
+            ctx.data().playback_status.clone(),
+            guild_id,
+            track_handle,
+        )
+        .await;
+    }
+
+    ctx.say(response).await?;
 
     Ok(())
 }
@@ -1290,6 +1589,18 @@ pub async fn seek(
     let _ = new_handle.set_volume(volume);
     if was_paused {
         let _ = new_handle.pause();
+        if let Some(guild_id) = ctx.guild_id() {
+            let track_uuid = new_handle.uuid().to_string();
+            update_playback_status_for_track(
+                ctx.serenity_context(),
+                ctx.data().playback_status.clone(),
+                guild_id,
+                &track_uuid,
+                &new_handle,
+                PlaybackStatusKind::Paused,
+            )
+            .await;
+        }
     }
 
     ctx.say(format!(
@@ -1419,6 +1730,9 @@ pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
 /// Stop playback and clear the queue.
 #[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(guild_id) = guild_id(ctx).await? else {
+        return Ok(());
+    };
     let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
         return Ok(());
     };
@@ -1426,6 +1740,12 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 
     // Stop the playback and clear the queue
     handler.queue().stop();
+    clear_playback_status_for_guild(
+        ctx.serenity_context(),
+        ctx.data().playback_status.clone(),
+        guild_id,
+    )
+    .await;
 
     ctx.say("Stopped the playback and cleared the queue.")
         .await?;
@@ -1476,6 +1796,12 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
         }
 
         let _ = manager.remove(guild_id).await;
+        clear_playback_status_for_guild(
+            ctx.serenity_context(),
+            ctx.data().playback_status.clone(),
+            guild_id,
+        )
+        .await;
         tracing::info!(guild_id = %guild_id, "Left voice channel");
         ctx.say("Disconnected from the voice channel.").await?;
     } else {

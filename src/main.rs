@@ -12,7 +12,7 @@ async fn event_handler(
     ctx: &serenity::Context,
     event: &serenity::FullEvent,
     _framework: poise::FrameworkContext<'_, commands::Data, commands::Error>,
-    _data: &commands::Data,
+    data: &commands::Data,
 ) -> Result<(), commands::Error> {
     if let serenity::FullEvent::VoiceStateUpdate { old: _, new } = event {
         let guild_id = match new.guild_id {
@@ -45,6 +45,7 @@ async fn event_handler(
         // If only 1 user inside channel (should be the bot)
         if users_in_channel == 1 {
             let ctx_clone = ctx.clone();
+            let playback_status = data.playback_status.clone();
 
             tokio::spawn(async move {
                 // Wait 5 minutes
@@ -71,6 +72,12 @@ async fn event_handler(
                 // Disconnect if bot is the remaining user in a voice channel after 5 minutes
                 if should_disconnect && let Some(manager) = songbird::get(&ctx_clone).await {
                     let _ = manager.remove(guild_id).await;
+                    commands::clear_playback_status_for_guild(
+                        &ctx_clone,
+                        playback_status,
+                        guild_id,
+                    )
+                    .await;
                     tracing::info!(guild_id = %guild_id, "Left voice channel due to inactivity");
                 }
             });
@@ -202,6 +209,9 @@ async fn run() -> Result<(), commands::Error> {
                     command_prefix: prefix.clone(),
                     repeat_modes: std::sync::Arc::new(tokio::sync::Mutex::new(
                         std::collections::HashMap::new(),
+                    )),
+                    playback_status: std::sync::Arc::new(tokio::sync::Mutex::new(
+                        commands::PlaybackStatusState::default(),
                     )),
                 })
             })
