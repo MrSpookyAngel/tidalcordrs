@@ -307,6 +307,7 @@ impl FfmpegStream {
 impl songbird::input::Compose for FfmpegStream {
     fn create(&mut self) -> Result<AudioStream<Box<dyn MediaSource>>, AudioStreamError> {
         let child = self.spawn()?;
+        self.start_position = Duration::ZERO;
         let input = SpoolReader::new(child, self.spool_read_ahead_bytes)?;
         Ok(AudioStream {
             input: Box::new(input) as Box<dyn MediaSource>,

@@ -1,4 +1,5 @@
 use songbird::tracks::PlayMode;
+use std::collections::HashMap;
 use std::time::Duration;
 
 pub struct Data {
@@ -6,12 +7,32 @@ pub struct Data {
     pub spool_read_ahead_bytes: u64,
     pub collection_track_fetch_concurrency: usize,
     pub command_prefix: String,
+    pub repeat_modes:
+        std::sync::Arc<tokio::sync::Mutex<HashMap<serenity::model::id::GuildId, RepeatMode>>>,
 }
 pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
 const QUEUE_PAGE_SIZE: usize = 10;
 const TRACK_INFO_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, poise::ChoiceParameter)]
+pub enum RepeatMode {
+    #[name = "off"]
+    Off,
+    #[name = "track"]
+    Track,
+    #[name = "queue"]
+    Queue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, poise::ChoiceParameter)]
+pub enum RepeatCommandMode {
+    #[name = "off"]
+    Off,
+    #[name = "all"]
+    All,
+}
 
 struct TrackErrorNotifier;
 
@@ -28,6 +49,62 @@ impl songbird::events::EventHandler for TrackErrorNotifier {
                     state = ?state.playing,
                     "Track encountered an error"
                 );
+            }
+        }
+
+        None
+    }
+}
+
+struct RepeatModeNotifier {
+    handler_lock: std::sync::Arc<tokio::sync::Mutex<songbird::Call>>,
+    repeat_modes:
+        std::sync::Arc<tokio::sync::Mutex<HashMap<serenity::model::id::GuildId, RepeatMode>>>,
+    guild_id: serenity::model::id::GuildId,
+    spool_read_ahead_bytes: u64,
+}
+
+#[serenity::async_trait]
+impl songbird::events::EventHandler for RepeatModeNotifier {
+    async fn act(
+        &self,
+        ctx: &songbird::events::EventContext<'_>,
+    ) -> Option<songbird::events::Event> {
+        let repeat_mode = {
+            let repeat_modes = self.repeat_modes.lock().await;
+            repeat_modes
+                .get(&self.guild_id)
+                .copied()
+                .unwrap_or(RepeatMode::Off)
+        };
+        if repeat_mode == RepeatMode::Off {
+            return None;
+        }
+
+        if let songbird::events::EventContext::Track(track_list) = ctx {
+            for (state, handle) in *track_list {
+                match (repeat_mode, &state.playing) {
+                    (RepeatMode::Track, PlayMode::Play) => {
+                        if let Err(error) = handle.enable_loop() {
+                            tracing::warn!(%error, "Failed to enable track repeat");
+                        }
+                    }
+                    (RepeatMode::Queue, PlayMode::End) => {
+                        let track = handle.data::<crate::track::Track>();
+                        let mut handler = self.handler_lock.lock().await;
+                        if let Err(error) = enqueue_track_with_spool(
+                            &mut handler,
+                            &track,
+                            Duration::ZERO,
+                            self.spool_read_ahead_bytes,
+                        )
+                        .await
+                        {
+                            tracing::warn!(%error, "Failed to requeue track for queue repeat");
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -72,6 +149,7 @@ fn help_message(prefix: &str) -> String {
             "`/seek <position>` or `{0}seek <position>` (`{0}seekto`, `{0}jump`, `{0}jumpto`, `{0}go`, `{0}goto`) - Seek the current track to `seconds`, `mm:ss`, or `hh:mm:ss`.\n",
             "`/skip` or `{0}skip` (`{0}s`, `{0}next`) - Skip the current track.\n",
             "`/playnext <query-or-url>` or `{0}playnext <query-or-url>` - Insert a song, album, playlist, Tidal URL, or supported YouTube URL right after the current track.\n",
+            "`/repeat [all|off]` or `{0}repeat [all|off]` (`{0}loop`) - Repeat the current track, all tracks, or turn repeat off.\n",
             "`/shuffle` or `{0}shuffle` - Shuffle the queued tracks.\n",
             "`/remove <position>` or `{0}remove <position>` (`{0}delete <position>`) - Remove a queued track by its position in `queue`. Position `1` is the next track.\n",
             "`/stop` or `{0}stop` (`{0}clear`) - Stop playback and clear the queue.\n",
@@ -94,6 +172,31 @@ fn format_duration_seconds(total_seconds: u64) -> String {
     } else {
         format!("{:02}:{:02}", minutes, seconds)
     }
+}
+
+fn repeat_mode_name(mode: RepeatMode) -> &'static str {
+    match mode {
+        RepeatMode::Off => "off",
+        RepeatMode::Track => "track",
+        RepeatMode::Queue => "all",
+    }
+}
+
+async fn current_repeat_mode(ctx: Context<'_>) -> Result<Option<RepeatMode>, Error> {
+    let Some(guild_id) = guild_id(ctx).await? else {
+        return Ok(None);
+    };
+
+    let repeat_mode = ctx
+        .data()
+        .repeat_modes
+        .lock()
+        .await
+        .get(&guild_id)
+        .copied()
+        .unwrap_or(RepeatMode::Off);
+
+    Ok(Some(repeat_mode))
 }
 
 fn parse_seek_position(position: &str) -> Result<Duration, String> {
@@ -336,6 +439,14 @@ mod tests {
             Err("That page is outside the queue. There is only 1 page available.".to_string())
         );
     }
+
+    #[test]
+    fn formats_empty_queue_with_repeat_mode() {
+        assert_eq!(
+            format_queue_message(&[], 1, RepeatMode::Queue),
+            Ok("**Repeat:** all\n\nThe queue is currently empty.".to_string())
+        );
+    }
 }
 
 /// Check whether the bot is responding.
@@ -442,10 +553,29 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<Option<JoinVoiceChan
 
     // Join (or move to) the voice channel
     if let Ok(handler_lock) = manager.join(guild_id, channel_id).await {
+        let repeat_handler_lock = handler_lock.clone();
         let mut handler = handler_lock.lock().await;
         handler.add_global_event(
             songbird::events::TrackEvent::Error.into(),
             TrackErrorNotifier,
+        );
+        handler.add_global_event(
+            songbird::events::TrackEvent::End.into(),
+            RepeatModeNotifier {
+                handler_lock: repeat_handler_lock.clone(),
+                repeat_modes: ctx.data().repeat_modes.clone(),
+                guild_id,
+                spool_read_ahead_bytes: ctx.data().spool_read_ahead_bytes,
+            },
+        );
+        handler.add_global_event(
+            songbird::events::TrackEvent::Play.into(),
+            RepeatModeNotifier {
+                handler_lock: repeat_handler_lock,
+                repeat_modes: ctx.data().repeat_modes.clone(),
+                guild_id,
+                spool_read_ahead_bytes: ctx.data().spool_read_ahead_bytes,
+            },
         );
         Ok(Some(JoinVoiceChannelState::Joined))
     } else {
@@ -537,6 +667,60 @@ fn move_appended_tracks_next<T>(queue: &mut [T], inserted_count: usize) {
     up_next.rotate_right(inserted_count);
 }
 
+fn disable_track_loops(queue: &[songbird::tracks::TrackHandle]) {
+    for track_handle in queue {
+        let _ = track_handle.disable_loop();
+    }
+}
+
+async fn set_repeat_mode(ctx: Context<'_>, mode: RepeatMode) -> Result<(), Error> {
+    let Some(guild_id) = guild_id(ctx).await? else {
+        return Ok(());
+    };
+    let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
+        return Ok(());
+    };
+
+    let queue = {
+        let handler = handler_lock.lock().await;
+        handler.queue().current_queue()
+    };
+
+    match mode {
+        RepeatMode::Off => {
+            disable_track_loops(&queue);
+            ctx.data().repeat_modes.lock().await.remove(&guild_id);
+            ctx.say("Repeat mode turned off.").await?;
+        }
+        RepeatMode::Track => {
+            let Some(current) = queue.first() else {
+                ctx.say("No track is currently playing.").await?;
+                return Ok(());
+            };
+
+            disable_track_loops(&queue);
+            current.enable_loop()?;
+            ctx.data()
+                .repeat_modes
+                .lock()
+                .await
+                .insert(guild_id, RepeatMode::Track);
+            ctx.say("Repeating the current track.").await?;
+        }
+        RepeatMode::Queue => {
+            disable_track_loops(&queue);
+            ctx.data()
+                .repeat_modes
+                .lock()
+                .await
+                .insert(guild_id, RepeatMode::Queue);
+            ctx.say("Repeating the queue.").await?;
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_queue_page_request(page: Option<&str>) -> Result<usize, String> {
     let Some(page) = page.map(str::trim).filter(|page| !page.is_empty()) else {
         return Ok(1);
@@ -583,12 +767,16 @@ fn queue_page_bounds(up_next_count: usize, page: usize) -> Result<(usize, usize,
 fn format_queue_message(
     queue: &[songbird::tracks::TrackHandle],
     page: usize,
+    repeat_mode: RepeatMode,
 ) -> Result<String, String> {
     if queue.is_empty() {
-        return Ok("The queue is currently empty.".to_string());
+        return Ok(format!(
+            "**Repeat:** {}\n\nThe queue is currently empty.",
+            repeat_mode_name(repeat_mode)
+        ));
     }
 
-    let mut message = String::new();
+    let mut message = format!("**Repeat:** {}\n\n", repeat_mode_name(repeat_mode));
 
     if let Some(current) = queue.first() {
         let track_data = current.data::<crate::track::Track>();
@@ -697,12 +885,27 @@ async fn enqueue_track_at(
     track: &crate::track::Track,
     start_position: Duration,
 ) -> Result<songbird::tracks::TrackHandle, Error> {
+    enqueue_track_with_spool(
+        handler,
+        track,
+        start_position,
+        ctx.data().spool_read_ahead_bytes,
+    )
+    .await
+}
+
+async fn enqueue_track_with_spool(
+    handler: &mut songbird::Call,
+    track: &crate::track::Track,
+    start_position: Duration,
+    spool_read_ahead_bytes: u64,
+) -> Result<songbird::tracks::TrackHandle, Error> {
     let ffmpeg_stream = if start_position.is_zero() {
-        crate::ffmpeg_spool::FfmpegStream::new(&track.stream_url, ctx.data().spool_read_ahead_bytes)
+        crate::ffmpeg_spool::FfmpegStream::new(&track.stream_url, spool_read_ahead_bytes)
     } else {
         crate::ffmpeg_spool::FfmpegStream::new_at(
             &track.stream_url,
-            ctx.data().spool_read_ahead_bytes,
+            spool_read_ahead_bytes,
             start_position,
         )
     };
@@ -939,6 +1142,21 @@ pub async fn playnext(
     }
 
     Ok(())
+}
+
+/// Set repeat mode to the current track, all tracks, or off.
+#[poise::command(slash_command, prefix_command, aliases("loop"), guild_only)]
+pub async fn repeat(
+    ctx: Context<'_>,
+    #[description = "Repeat mode: all or off"] mode: Option<RepeatCommandMode>,
+) -> Result<(), Error> {
+    let mode = match mode {
+        Some(RepeatCommandMode::Off) => RepeatMode::Off,
+        Some(RepeatCommandMode::All) => RepeatMode::Queue,
+        None => RepeatMode::Track,
+    };
+
+    set_repeat_mode(ctx, mode).await
 }
 
 /// Pause the current playback.
@@ -1245,6 +1463,7 @@ pub async fn queue(
     let handler = handler_lock.lock().await;
 
     let queue = handler.queue().current_queue();
+    let repeat_mode = current_repeat_mode(ctx).await?.unwrap_or(RepeatMode::Off);
     let page = match parse_queue_page_request(page.as_deref()) {
         Ok(page) => page,
         Err(message) => {
@@ -1253,7 +1472,7 @@ pub async fn queue(
         }
     };
 
-    match format_queue_message(&queue, page) {
+    match format_queue_message(&queue, page, repeat_mode) {
         Ok(message) => ctx.say(message).await?,
         Err(message) => ctx.say(message).await?,
     };

@@ -166,6 +166,7 @@ async fn run() -> Result<(), commands::Error> {
                 commands::resume(),
                 commands::seek(),
                 commands::skip(),
+                commands::repeat(),
                 commands::shuffle(),
                 commands::remove(),
                 commands::stop(),
@@ -198,6 +199,9 @@ async fn run() -> Result<(), commands::Error> {
                     spool_read_ahead_bytes,
                     collection_track_fetch_concurrency,
                     command_prefix: prefix.clone(),
+                    repeat_modes: std::sync::Arc::new(tokio::sync::Mutex::new(
+                        std::collections::HashMap::new(),
+                    )),
                 })
             })
         })
