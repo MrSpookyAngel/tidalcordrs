@@ -73,6 +73,7 @@ fn help_message(prefix: &str) -> String {
             "`/pause` or `{0}pause` (`{0}wait`) - Pause the current track.\n",
             "`/resume` or `{0}resume` (`{0}unpause`, `{0}continue`) - Resume playback.\n",
             "`/skip` or `{0}skip` (`{0}s`, `{0}next`) - Skip the current track.\n",
+            "`/remove <position>` or `{0}remove <position>` (`{0}delete <position>`) - Remove a queued track by its position in `queue`. Position `1` is the next track.\n",
             "`/stop` or `{0}stop` (`{0}clear`) - Stop playback and clear the queue.\n",
             "`/current` or `{0}current` (`{0}currentplaying`, `{0}now`, `{0}nowplaying`, `{0}playing`, `{0}np`) - Show the current track.\n",
             "`/leave` or `{0}leave` (`{0}disconnect`) - Disconnect from voice.\n",
@@ -121,6 +122,32 @@ mod tests {
                 3661
             )),
             "Main Artist - Song Title feat. Guest One (01:01:01)"
+        );
+    }
+
+    #[test]
+    fn maps_remove_position_to_queue_index() {
+        assert_eq!(queue_remove_index(4, 1), Ok(1));
+        assert_eq!(queue_remove_index(4, 3), Ok(3));
+    }
+
+    #[test]
+    fn rejects_remove_position_when_queue_has_no_up_next_tracks() {
+        assert_eq!(
+            queue_remove_index(1, 1),
+            Err("There are no queued tracks to remove.")
+        );
+    }
+
+    #[test]
+    fn rejects_remove_position_zero_or_out_of_range() {
+        assert_eq!(
+            queue_remove_index(3, 0),
+            Err("Position must be at least 1.")
+        );
+        assert_eq!(
+            queue_remove_index(3, 3),
+            Err("That position is outside the current queue.")
         );
     }
 }
@@ -276,6 +303,22 @@ async fn resume_playback_message(handler: &songbird::Call) -> Result<&'static st
         PlayMode::Play => "Track already playing.",
         _ => "No track is currently playing.",
     })
+}
+
+fn queue_remove_index(queue_len: usize, position: usize) -> Result<usize, &'static str> {
+    if position == 0 {
+        return Err("Position must be at least 1.");
+    }
+
+    if queue_len <= 1 {
+        return Err("There are no queued tracks to remove.");
+    }
+
+    if position >= queue_len {
+        return Err("That position is outside the current queue.");
+    }
+
+    Ok(position)
 }
 
 /// Join the voice channel you are currently in.
@@ -511,6 +554,44 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
+/// Remove a queued track by its position in the queue display.
+#[poise::command(slash_command, prefix_command, aliases("delete"), guild_only)]
+pub async fn remove(
+    ctx: Context<'_>,
+    #[description = "Queue position to remove, where 1 is the next track"] position: usize,
+) -> Result<(), Error> {
+    let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
+        return Ok(());
+    };
+    let handler = handler_lock.lock().await;
+
+    let queue = handler.queue().current_queue();
+    let queue_index = match queue_remove_index(queue.len(), position) {
+        Ok(queue_index) => queue_index,
+        Err(message) => {
+            ctx.say(message).await?;
+            return Ok(());
+        }
+    };
+
+    let Some(removed_track) = handler.queue().dequeue(queue_index) else {
+        ctx.say("Failed to remove that track from the queue.")
+            .await?;
+        return Ok(());
+    };
+
+    let removed_track_data = removed_track.data::<crate::track::Track>().clone();
+    let _ = removed_track.stop();
+
+    ctx.say(format!(
+        "Removed **{}** from the queue.",
+        get_formatted_track(&removed_track_data)
+    ))
+    .await?;
+
+    Ok(())
+}
+
 /// Stop playback and clear the queue.
 #[poise::command(slash_command, prefix_command, aliases("clear"), guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
@@ -581,12 +662,7 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Show the current queue and what is up next.
-#[poise::command(
-    slash_command,
-    prefix_command,
-    aliases("q", "list", "l"),
-    guild_only
-)]
+#[poise::command(slash_command, prefix_command, aliases("q", "list", "l"), guild_only)]
 pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {
     let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
         return Ok(());
