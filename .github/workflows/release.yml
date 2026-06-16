@@ -55,6 +55,9 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Set universal arch and set CMAKE version minimum (macOS)
         if: matrix.os == 'macos-latest'
         run: |
@@ -151,6 +154,8 @@ jobs:
         with:
           context: .
           push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             ghcr.io/${{ env.repo_lowercase }}:latest
             ghcr.io/${{ env.repo_lowercase }}:${{ needs.check-version.outputs.version }}
