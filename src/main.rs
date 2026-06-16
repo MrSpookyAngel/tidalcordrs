@@ -169,6 +169,7 @@ async fn run() -> Result<(), commands::Error> {
                 commands::repeat(),
                 commands::shuffle(),
                 commands::remove(),
+                commands::clear(),
                 commands::stop(),
                 commands::current(),
                 commands::leave(),

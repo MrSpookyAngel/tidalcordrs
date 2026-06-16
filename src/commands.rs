@@ -30,6 +30,8 @@ pub enum RepeatMode {
 pub enum RepeatCommandMode {
     #[name = "off"]
     Off,
+    #[name = "track"]
+    Track,
     #[name = "all"]
     All,
 }
@@ -146,13 +148,14 @@ fn help_message(prefix: &str) -> String {
             "`/play <query-or-url>` or `{0}play <query-or-url>` (`{0}p`) - Queue a song, album, playlist, Tidal URL, or supported YouTube URL.\n",
             "`/pause` or `{0}pause` (`{0}wait`) - Pause the current track.\n",
             "`/resume` or `{0}resume` (`{0}unpause`, `{0}continue`) - Resume playback.\n",
-            "`/seek <position>` or `{0}seek <position>` (`{0}seekto`, `{0}jump`, `{0}jumpto`, `{0}go`, `{0}goto`) - Seek the current track to `seconds`, `mm:ss`, or `hh:mm:ss`.\n",
+            "`/seek <position>` or `{0}seek <position>` (`{0}seekto`, `{0}jump`, `{0}jumpto`, `{0}goto`) - Seek the current track to `seconds`, `mm:ss`, or `hh:mm:ss`.\n",
             "`/skip` or `{0}skip` (`{0}s`, `{0}next`) - Skip the current track.\n",
-            "`/playnext <query-or-url>` or `{0}playnext <query-or-url>` - Insert a song, album, playlist, Tidal URL, or supported YouTube URL right after the current track.\n",
-            "`/repeat [all|off]` or `{0}repeat [all|off]` (`{0}loop`) - Repeat the current track, all tracks, or turn repeat off.\n",
+            "`/playnext <query-or-url>` or `{0}playnext <query-or-url>` (`{0}pn`) - Insert a song, album, playlist, Tidal URL, or supported YouTube URL right after the current track.\n",
+            "`/repeat [track|all|off]` or `{0}repeat [track|all|off]` (`{0}loop`) - Repeat the current track, all tracks, or turn repeat off.\n",
             "`/shuffle` or `{0}shuffle` - Shuffle the queued tracks.\n",
             "`/remove <position>` or `{0}remove <position>` (`{0}delete <position>`) - Remove a queued track by its position in `queue`. Position `1` is the next track.\n",
-            "`/stop` or `{0}stop` (`{0}clear`) - Stop playback and clear the queue.\n",
+            "`/clear` or `{0}clear` - Clear queued tracks without stopping the current track.\n",
+            "`/stop` or `{0}stop` - Stop playback and clear the queue.\n",
             "`/current` or `{0}current` (`{0}currentplaying`, `{0}now`, `{0}nowplaying`, `{0}playing`, `{0}np`) - Show the current track.\n",
             "`/leave` or `{0}leave` (`{0}disconnect`) - Disconnect from voice.\n",
             "`/queue` or `{0}queue` (`{0}q`, `{0}list`, `{0}l`) - Show the current queue.\n",
@@ -1042,7 +1045,7 @@ pub async fn play(
 }
 
 /// Insert a track from a search query or supported URL right after the current track.
-#[poise::command(slash_command, prefix_command, guild_only)]
+#[poise::command(slash_command, prefix_command, aliases("pn"), guild_only)]
 pub async fn playnext(
     ctx: Context<'_>,
     #[description = "Provide the query or url of a song"]
@@ -1148,10 +1151,11 @@ pub async fn playnext(
 #[poise::command(slash_command, prefix_command, aliases("loop"), guild_only)]
 pub async fn repeat(
     ctx: Context<'_>,
-    #[description = "Repeat mode: all or off"] mode: Option<RepeatCommandMode>,
+    #[description = "Repeat mode: track, all, or off"] mode: Option<RepeatCommandMode>,
 ) -> Result<(), Error> {
     let mode = match mode {
         Some(RepeatCommandMode::Off) => RepeatMode::Off,
+        Some(RepeatCommandMode::Track) => RepeatMode::Track,
         Some(RepeatCommandMode::All) => RepeatMode::Queue,
         None => RepeatMode::Track,
     };
@@ -1194,7 +1198,7 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
     slash_command,
     prefix_command,
     guild_only,
-    aliases("seekto", "jump", "jumpto", "go", "goto")
+    aliases("seekto", "jump", "jumpto", "goto")
 )]
 pub async fn seek(
     ctx: Context<'_>,
@@ -1380,8 +1384,40 @@ pub async fn remove(
     Ok(())
 }
 
+/// Clear queued tracks without stopping the current track.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
+        return Ok(());
+    };
+    let handler = handler_lock.lock().await;
+
+    let queue_len = handler.queue().len();
+    if queue_len <= 1 {
+        ctx.say("There are no queued tracks to clear.").await?;
+        return Ok(());
+    }
+
+    let mut removed_count = 0;
+    for _ in 1..queue_len {
+        if let Some(track) = handler.queue().dequeue(1) {
+            let _ = track.stop();
+            removed_count += 1;
+        }
+    }
+
+    ctx.say(format!(
+        "Cleared {} queued track{}.",
+        removed_count,
+        if removed_count == 1 { "" } else { "s" }
+    ))
+    .await?;
+
+    Ok(())
+}
+
 /// Stop playback and clear the queue.
-#[poise::command(slash_command, prefix_command, aliases("clear"), guild_only)]
+#[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
         return Ok(());
