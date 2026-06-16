@@ -28,7 +28,8 @@ WORKDIR /app
 
 RUN apk add --no-cache \
     ca-certificates \
-    ffmpeg
+    ffmpeg \
+    tzdata
 
 COPY --from=builder /app/target/release/tidalcordrs /usr/local/bin/tidalcordrs
 

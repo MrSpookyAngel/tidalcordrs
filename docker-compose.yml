@@ -7,22 +7,23 @@ services:
     restart: unless-stopped
     environment:
       # Credentials (change this)
-      DISCORD_TOKEN: "${DISCORD_TOKEN}"
+      DISCORD_TOKEN: "${DISCORD_TOKEN:?DISCORD_TOKEN is required}"
 
       # Configuration (change these if you want)
-      COMMAND_PREFIX: "!"
+      COMMAND_PREFIX: "${COMMAND_PREFIX:-!}"
+      TZ: "${TZ:-UTC}"
 
       # Technical Configuration (only change these if you know what you're doing)
-      SPOOL_READ_AHEAD_MIB: "16"
-      COLLECTION_TRACK_FETCH_CONCURRENCY: "8"
-      TIDAL_TOKEN_SESSION_PATH: "data/tidal_token.json"
-      TIDAL_CLIENT_ID: "fX2JxdmntZWK0ixT"
-      TIDAL_CLIENT_SECRET: "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
-      USER_AGENT: "Mozilla/5.0 (Linux; Android 10; uis8581a2h10_Automotive) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36"
-      OAUTH_DEVICE_AUTH_URL: "https://auth.tidal.com/v1/oauth2/device_authorization"
-      OAUTH_TOKEN_URL: "https://auth.tidal.com/v1/oauth2/token"
-      SESSIONS_URL: "https://api.tidal.com/v1/sessions"
-      SEARCH_URL: "https://api.tidal.com/v1/search"
+      SPOOL_READ_AHEAD_MIB: "${SPOOL_READ_AHEAD_MIB:-16}"
+      COLLECTION_TRACK_FETCH_CONCURRENCY: "${COLLECTION_TRACK_FETCH_CONCURRENCY:-8}"
+      TIDAL_TOKEN_SESSION_PATH: "${TIDAL_TOKEN_SESSION_PATH:-data/tidal_token.json}"
+      TIDAL_CLIENT_ID: "${TIDAL_CLIENT_ID:-fX2JxdmntZWK0ixT}"
+      TIDAL_CLIENT_SECRET: "${TIDAL_CLIENT_SECRET:-1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg=}"
+      USER_AGENT: "${USER_AGENT:-Mozilla/5.0 (Linux; Android 10; uis8581a2h10_Automotive) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36}"
+      OAUTH_DEVICE_AUTH_URL: "${OAUTH_DEVICE_AUTH_URL:-https://auth.tidal.com/v1/oauth2/device_authorization}"
+      OAUTH_TOKEN_URL: "${OAUTH_TOKEN_URL:-https://auth.tidal.com/v1/oauth2/token}"
+      SESSIONS_URL: "${SESSIONS_URL:-https://api.tidal.com/v1/sessions}"
+      SEARCH_URL: "${SEARCH_URL:-https://api.tidal.com/v1/search}"
     volumes:
       - app-data:/app/data
 
