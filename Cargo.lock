@@ -4173,6 +4173,7 @@ name = "tidalcordrs"
 version = "2.1.0"
 dependencies = [
  "dotenvy",
+ "fastrand",
  "html-escape",
  "lol_html",
  "poise",

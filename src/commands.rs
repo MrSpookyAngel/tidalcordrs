@@ -73,6 +73,7 @@ fn help_message(prefix: &str) -> String {
             "`/pause` or `{0}pause` (`{0}wait`) - Pause the current track.\n",
             "`/resume` or `{0}resume` (`{0}unpause`, `{0}continue`) - Resume playback.\n",
             "`/skip` or `{0}skip` (`{0}s`, `{0}next`) - Skip the current track.\n",
+            "`/shuffle` or `{0}shuffle` - Shuffle the queued tracks.\n",
             "`/remove <position>` or `{0}remove <position>` (`{0}delete <position>`) - Remove a queued track by its position in `queue`. Position `1` is the next track.\n",
             "`/stop` or `{0}stop` (`{0}clear`) - Stop playback and clear the queue.\n",
             "`/current` or `{0}current` (`{0}currentplaying`, `{0}now`, `{0}nowplaying`, `{0}playing`, `{0}np`) - Show the current track.\n",
@@ -149,6 +150,36 @@ mod tests {
             queue_remove_index(3, 3),
             Err("That position is outside the current queue.")
         );
+    }
+
+    #[test]
+    fn shuffle_keeps_current_track_at_front() {
+        let mut values = vec![1, 2, 3, 4, 5];
+        let mut rng = fastrand::Rng::with_seed(7);
+
+        shuffle_up_next(&mut values, &mut rng);
+
+        assert_eq!(values[0], 1);
+    }
+
+    #[test]
+    fn shuffle_preserves_all_up_next_tracks() {
+        let mut values = vec![1, 2, 3, 4, 5];
+        let mut rng = fastrand::Rng::with_seed(7);
+
+        shuffle_up_next(&mut values, &mut rng);
+
+        let mut up_next = values[1..].to_vec();
+        up_next.sort_unstable();
+        assert_eq!(up_next, vec![2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn shuffle_availability_requires_two_up_next_tracks() {
+        assert!(!can_shuffle_queue(0));
+        assert!(!can_shuffle_queue(1));
+        assert!(!can_shuffle_queue(2));
+        assert!(can_shuffle_queue(3));
     }
 }
 
@@ -319,6 +350,23 @@ fn queue_remove_index(queue_len: usize, position: usize) -> Result<usize, &'stat
     }
 
     Ok(position)
+}
+
+fn can_shuffle_queue(queue_len: usize) -> bool {
+    queue_len >= 3
+}
+
+fn shuffle_up_next<T>(queue: &mut [T], rng: &mut fastrand::Rng) {
+    if queue.len() <= 2 {
+        return;
+    }
+
+    let up_next = &mut queue[1..];
+
+    for i in (1..up_next.len()).rev() {
+        let j = rng.usize(..=i);
+        up_next.swap(i, j);
+    }
 }
 
 /// Join the voice channel you are currently in.
@@ -550,6 +598,32 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     } else {
         ctx.say("No track in the queue.").await?;
     }
+
+    Ok(())
+}
+
+/// Shuffle the queued tracks.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn shuffle(ctx: Context<'_>) -> Result<(), Error> {
+    let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
+        return Ok(());
+    };
+    let handler = handler_lock.lock().await;
+
+    let queue_len = handler.queue().len();
+    if !can_shuffle_queue(queue_len) {
+        ctx.say("Need at least 2 queued tracks to shuffle.").await?;
+        return Ok(());
+    }
+
+    {
+        let mut rng = fastrand::Rng::new();
+        handler.queue().modify_queue(|queue| {
+            shuffle_up_next(queue.make_contiguous(), &mut rng);
+        });
+    }
+
+    ctx.say("Shuffled the queue.").await?;
 
     Ok(())
 }

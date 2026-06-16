@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 dotenvy = "0.15.7"
+fastrand = "2.4.1"
 html-escape = "0.2.13"
 lol_html = "2.7.2"
 poise = "0.6.2"
