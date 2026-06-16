@@ -158,9 +158,14 @@ async fn voice_call(
     }
 }
 
-async fn try_join_voice_channel(ctx: Context<'_>) -> Result<bool, Error> {
+enum JoinVoiceChannelState {
+    Joined,
+    AlreadyConnected,
+}
+
+async fn try_join_voice_channel(ctx: Context<'_>) -> Result<Option<JoinVoiceChannelState>, Error> {
     let Some((guild_id, manager)) = guild_voice_manager(ctx).await? else {
-        return Ok(false);
+        return Ok(None);
     };
 
     // Get the voice states from the guild
@@ -168,7 +173,7 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<bool, Error> {
         guild.voice_states.clone()
     } else {
         ctx.say("Voice states not available.").await?;
-        return Ok(false);
+        return Ok(None);
     };
 
     // Get the current voice channel ID of the user
@@ -180,7 +185,7 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<bool, Error> {
         None => {
             ctx.say("You must be in a voice channel to use this command.")
                 .await?;
-            return Ok(false);
+            return Ok(None);
         }
     };
 
@@ -188,7 +193,7 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<bool, Error> {
     if let Some(handler_lock) = manager.get(guild_id) {
         let handler = handler_lock.lock().await;
         if handler.current_channel() == Some(channel_id.into()) {
-            return Ok(true);
+            return Ok(Some(JoinVoiceChannelState::AlreadyConnected));
         }
     }
 
@@ -199,22 +204,65 @@ async fn try_join_voice_channel(ctx: Context<'_>) -> Result<bool, Error> {
             songbird::events::TrackEvent::Error.into(),
             TrackErrorNotifier,
         );
-        Ok(true)
+        Ok(Some(JoinVoiceChannelState::Joined))
     } else {
         ctx.say("Failed to join the voice channel.").await?;
-        Ok(false)
+        Ok(None)
     }
 }
 
-#[poise::command(slash_command, prefix_command, aliases("join", "j"), guild_only)]
+async fn pause_playback_message(handler: &songbird::Call) -> Result<&'static str, Error> {
+    let Some(track_handle) = handler.queue().current() else {
+        return Ok("No track is currently playing.");
+    };
+
+    let track_info = track_handle.get_info().await?;
+
+    Ok(match track_info.playing {
+        PlayMode::Play => {
+            let _ = handler.queue().pause();
+            "Paused the playback."
+        }
+        PlayMode::Pause => "Playback is already paused.",
+        _ => "No track is currently playing.",
+    })
+}
+
+async fn resume_playback_message(handler: &songbird::Call) -> Result<&'static str, Error> {
+    let Some(track_handle) = handler.queue().current() else {
+        return Ok("No track is currently playing.");
+    };
+
+    let track_info = track_handle.get_info().await?;
+
+    Ok(match track_info.playing {
+        PlayMode::Pause => {
+            if handler.queue().resume().is_ok() {
+                "Resumed the playback."
+            } else {
+                "Failed to resume the playback."
+            }
+        }
+        PlayMode::Play => "Track already playing.",
+        _ => "No track is currently playing.",
+    })
+}
+
+#[poise::command(slash_command, prefix_command, aliases("j"), guild_only)]
 pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
     // Attempt to join the voice channel if not already connected
-    try_join_voice_channel(ctx).await?;
+    if let Some(state) = try_join_voice_channel(ctx).await? {
+        let message = match state {
+            JoinVoiceChannelState::Joined => "Joined your voice channel.",
+            JoinVoiceChannelState::AlreadyConnected => "Already connected to your voice channel.",
+        };
+        ctx.say(message).await?;
+    }
 
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("volume", "vol"), guild_only)]
+#[poise::command(slash_command, prefix_command, aliases("vol"), guild_only)]
 pub async fn volume(ctx: Context<'_>, volume: Option<u8>) -> Result<(), Error> {
     if volume.is_some_and(|volume| volume > 200) {
         ctx.say("Volume must be between 0 and 200.").await?;
@@ -262,7 +310,7 @@ async fn enqueue_track(
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("play", "p"), guild_only)]
+#[poise::command(slash_command, prefix_command, aliases("p"), guild_only)]
 pub async fn play(
     ctx: Context<'_>,
     #[description = "Provide the query or url of a song"]
@@ -270,7 +318,7 @@ pub async fn play(
     query_or_url: Option<String>,
 ) -> Result<(), Error> {
     // Attempt to join the voice channel if not already connected
-    if !try_join_voice_channel(ctx).await? {
+    if try_join_voice_channel(ctx).await?.is_none() {
         return Ok(());
     }
 
@@ -281,25 +329,7 @@ pub async fn play(
     if query_or_url.is_none() {
         if let Some(handler_lock) = manager.get(guild_id) {
             let handler = handler_lock.lock().await;
-            let current = handler.queue().current();
-            if let Some(track_handle) = current {
-                let track_info = track_handle.get_info().await?;
-                match track_info.playing {
-                    PlayMode::Pause => {
-                        if handler.queue().resume().is_ok() {
-                            ctx.say("Resumed the playback.").await?;
-                        } else {
-                            ctx.say("Failed to resume the playback.").await?;
-                        }
-                    }
-                    PlayMode::Play => {
-                        ctx.say("Track already playing.").await?;
-                    }
-                    _ => {
-                        // Do nothing
-                    }
-                }
-            }
+            ctx.say(resume_playback_message(&handler).await?).await?;
         } else {
             // Probably shouldn't happen since the bot would join in try_join_voice_channel
             ctx.say("I'm not in a voice channel.").await?;
@@ -391,17 +421,14 @@ pub async fn play(
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("pause", "wait"), guild_only)]
+#[poise::command(slash_command, prefix_command, aliases("wait"), guild_only)]
 pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
     let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
         return Ok(());
     };
     let handler = handler_lock.lock().await;
 
-    // Pause the playback
-    let _ = handler.queue().pause();
-
-    ctx.say("Paused the playback.").await?;
+    ctx.say(pause_playback_message(&handler).await?).await?;
 
     Ok(())
 }
@@ -409,7 +436,7 @@ pub async fn pause(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(
     slash_command,
     prefix_command,
-    aliases("resume", "unpause", "continue"),
+    aliases("unpause", "continue"),
     guild_only
 )]
 pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
@@ -417,25 +444,7 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
         return Ok(());
     };
     let handler = handler_lock.lock().await;
-    let current = handler.queue().current();
-    if let Some(track_handle) = current {
-        let track_info = track_handle.get_info().await?;
-        match track_info.playing {
-            PlayMode::Pause => {
-                if handler.queue().resume().is_ok() {
-                    ctx.say("Resumed the playback.").await?;
-                } else {
-                    ctx.say("Failed to resume the playback.").await?;
-                }
-            }
-            PlayMode::Play => {
-                ctx.say("Track already playing.").await?;
-            }
-            _ => {
-                // Do nothing
-            }
-        }
-    }
+    ctx.say(resume_playback_message(&handler).await?).await?;
 
     Ok(())
 }
@@ -463,7 +472,7 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-#[poise::command(slash_command, prefix_command, aliases("stop"), guild_only)]
+#[poise::command(slash_command, prefix_command, guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
         return Ok(());
@@ -482,7 +491,7 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(
     slash_command,
     prefix_command,
-    aliases("current", "currentplaying", "now", "nowplaying", "playing"),
+    aliases("currentplaying", "now", "nowplaying", "playing"),
     guild_only
 )]
 pub async fn current(ctx: Context<'_>) -> Result<(), Error> {
@@ -509,7 +518,7 @@ pub async fn current(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(
     slash_command,
     prefix_command,
-    aliases("leave", "disconnect"),
+    aliases("disconnect"),
     guild_only
 )]
 pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
@@ -519,9 +528,14 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
 
     // Get the songbird voice manager
     if let Some(manager) = songbird::get(ctx.serenity_context()).await {
-        // Leave the voice channel
+        if manager.get(guild_id).is_none() {
+            ctx.say("Not connected to a voice channel.").await?;
+            return Ok(());
+        }
+
         let _ = manager.remove(guild_id).await;
         tracing::info!(guild_id = %guild_id, "Left voice channel");
+        ctx.say("Disconnected from the voice channel.").await?;
     } else {
         ctx.say("Not connected to a voice channel.").await?;
     }
@@ -532,7 +546,7 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(
     slash_command,
     prefix_command,
-    aliases("queue", "q", "list", "l"),
+    aliases("q", "list", "l"),
     guild_only
 )]
 pub async fn queue(ctx: Context<'_>) -> Result<(), Error> {

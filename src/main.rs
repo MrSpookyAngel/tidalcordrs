@@ -177,8 +177,16 @@ async fn run() -> Result<(), commands::Error> {
             },
             ..Default::default()
         })
-        .setup(move |_ctx, ready, _framework| {
+        .setup(move |ctx, ready, framework| {
             Box::pin(async move {
+                for guild_status in &ready.guilds {
+                    poise::builtins::register_in_guild(
+                        ctx,
+                        &framework.options().commands,
+                        guild_status.id,
+                    )
+                    .await?;
+                }
                 tracing::info!(user = %ready.user.name, version, "Bot connected");
                 Ok(commands::Data {
                     session: tokio::sync::Mutex::new(tidal_session),
