@@ -1,10 +1,12 @@
 use songbird::input::core::io::MediaSource;
 use songbird::input::{AudioStream, AudioStreamError};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::time::Duration;
 
 pub struct FfmpegStream {
     url: String,
     spool_read_ahead_bytes: u64,
+    start_position: Duration,
 }
 
 struct SpoolState {
@@ -250,32 +252,42 @@ impl Drop for SpoolReader {
 
 impl FfmpegStream {
     pub fn new(url: &str, spool_read_ahead_bytes: u64) -> Self {
+        Self::new_at(url, spool_read_ahead_bytes, Duration::ZERO)
+    }
+
+    pub fn new_at(url: &str, spool_read_ahead_bytes: u64, start_position: Duration) -> Self {
         Self {
             url: url.to_string(),
             spool_read_ahead_bytes,
+            start_position,
         }
     }
 
     fn spawn(&self) -> Result<std::process::Child, AudioStreamError> {
-        let child = std::process::Command::new("ffmpeg")
+        let mut command = std::process::Command::new("ffmpeg");
+        command.args([
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_delay_max",
+            "5",
+        ]);
+
+        if !self.start_position.is_zero() {
+            command.arg("-ss").arg(format!(
+                "{}.{:03}",
+                self.start_position.as_secs(),
+                self.start_position.subsec_millis()
+            ));
+        }
+
+        let child = command
             .args([
-                "-loglevel",
-                "error",
-                "-nostdin",
-                "-reconnect",
-                "1",
-                "-reconnect_streamed",
-                "1",
-                "-reconnect_delay_max",
-                "5",
-                "-i",
-                &self.url,
-                "-vn",
-                "-c:a",
-                "libopus",
-                "-f",
-                "opus",
-                "pipe:1",
+                "-i", &self.url, "-vn", "-c:a", "libopus", "-f", "opus", "pipe:1",
             ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())

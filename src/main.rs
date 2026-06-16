@@ -164,6 +164,7 @@ async fn run() -> Result<(), commands::Error> {
                 commands::playnext(),
                 commands::pause(),
                 commands::resume(),
+                commands::seek(),
                 commands::skip(),
                 commands::shuffle(),
                 commands::remove(),

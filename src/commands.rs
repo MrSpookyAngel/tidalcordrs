@@ -1,4 +1,5 @@
 use songbird::tracks::PlayMode;
+use std::time::Duration;
 
 pub struct Data {
     pub session: tokio::sync::Mutex<crate::session::Session>,
@@ -10,6 +11,7 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
 const QUEUE_PAGE_SIZE: usize = 10;
+const TRACK_INFO_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct TrackErrorNotifier;
 
@@ -34,14 +36,7 @@ impl songbird::events::EventHandler for TrackErrorNotifier {
 }
 
 fn get_formatted_track(track: &crate::track::Track) -> String {
-    let hours = track.duration / 3600;
-    let minutes = (track.duration % 3600) / 60;
-    let seconds = track.duration % 60;
-    let duration = if hours > 0 {
-        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
-    } else {
-        format!("{:02}:{:02}", minutes, seconds)
-    };
+    let duration = format_duration_seconds(track.duration as u64);
     let featured = if track.featured_artists.is_empty() {
         String::new()
     } else {
@@ -74,6 +69,7 @@ fn help_message(prefix: &str) -> String {
             "`/play <query-or-url>` or `{0}play <query-or-url>` (`{0}p`) - Queue a song, album, playlist, Tidal URL, or supported YouTube URL.\n",
             "`/pause` or `{0}pause` (`{0}wait`) - Pause the current track.\n",
             "`/resume` or `{0}resume` (`{0}unpause`, `{0}continue`) - Resume playback.\n",
+            "`/seek <position>` or `{0}seek <position>` (`{0}jump`, `{0}seekto`, `{0}go`, `{0}goto`) - Seek the current track to `seconds`, `mm:ss`, or `hh:mm:ss`.\n",
             "`/skip` or `{0}skip` (`{0}s`, `{0}next`) - Skip the current track.\n",
             "`/playnext <query-or-url>` or `{0}playnext <query-or-url>` - Insert a song, album, playlist, Tidal URL, or supported YouTube URL right after the current track.\n",
             "`/shuffle` or `{0}shuffle` - Shuffle the queued tracks.\n",
@@ -86,6 +82,76 @@ fn help_message(prefix: &str) -> String {
         ),
         prefix
     )
+}
+
+fn format_duration_seconds(total_seconds: u64) -> String {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+
+    if hours > 0 {
+        format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+    } else {
+        format!("{:02}:{:02}", minutes, seconds)
+    }
+}
+
+fn parse_seek_position(position: &str) -> Result<Duration, String> {
+    let position = position.trim();
+    if position.is_empty() {
+        return Err("Provide a seek position like `90`, `1:30`, or `1:02:03`.".to_string());
+    }
+
+    if position.starts_with('-') {
+        return Err("Seek position cannot be negative.".to_string());
+    }
+
+    let parts = position.split(':').map(str::trim).collect::<Vec<&str>>();
+    if parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err("Use `seconds`, `mm:ss`, or `hh:mm:ss`.".to_string());
+    }
+
+    let values = parts
+        .iter()
+        .map(|part| {
+            part.parse::<u64>()
+                .map_err(|_| "Use `seconds`, `mm:ss`, or `hh:mm:ss`.".to_string())
+        })
+        .collect::<Result<Vec<u64>, String>>()?;
+
+    let seconds = match values.as_slice() {
+        [seconds] => *seconds,
+        [minutes, seconds] => {
+            if *seconds >= 60 {
+                return Err("Seconds must be less than 60 when using `mm:ss`.".to_string());
+            }
+
+            minutes
+                .checked_mul(60)
+                .and_then(|base| base.checked_add(*seconds))
+                .ok_or_else(|| "Seek position is too large.".to_string())?
+        }
+        [hours, minutes, seconds] => {
+            if *minutes >= 60 || *seconds >= 60 {
+                return Err(
+                    "Minutes and seconds must be less than 60 when using `hh:mm:ss`.".to_string(),
+                );
+            }
+
+            hours
+                .checked_mul(3600)
+                .and_then(|base| {
+                    minutes
+                        .checked_mul(60)
+                        .and_then(|mins| base.checked_add(mins))
+                })
+                .and_then(|base| base.checked_add(*seconds))
+                .ok_or_else(|| "Seek position is too large.".to_string())?
+        }
+        _ => unreachable!("empty seek positions are rejected before parsing"),
+    };
+
+    Ok(Duration::from_secs(seconds))
 }
 
 #[cfg(test)]
@@ -220,6 +286,40 @@ mod tests {
         assert_eq!(
             parse_queue_page_request(Some("later please")),
             Err("Use `queue`, `queue <page>`, or `queue page <page>`.".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_seek_positions() {
+        assert_eq!(parse_seek_position("90"), Ok(Duration::from_secs(90)));
+        assert_eq!(parse_seek_position("1:30"), Ok(Duration::from_secs(90)));
+        assert_eq!(
+            parse_seek_position("1:02:03"),
+            Ok(Duration::from_secs(3723))
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_seek_positions() {
+        assert_eq!(
+            parse_seek_position(""),
+            Err("Provide a seek position like `90`, `1:30`, or `1:02:03`.".to_string())
+        );
+        assert_eq!(
+            parse_seek_position("-1"),
+            Err("Seek position cannot be negative.".to_string())
+        );
+        assert_eq!(
+            parse_seek_position("1:60"),
+            Err("Seconds must be less than 60 when using `mm:ss`.".to_string())
+        );
+        assert_eq!(
+            parse_seek_position("1:60:00"),
+            Err("Minutes and seconds must be less than 60 when using `hh:mm:ss`.".to_string())
+        );
+        assert_eq!(
+            parse_seek_position("later"),
+            Err("Use `seconds`, `mm:ss`, or `hh:mm:ss`.".to_string())
         );
     }
 
@@ -588,10 +688,25 @@ async fn enqueue_track(
     handler: &mut songbird::Call,
     track: &crate::track::Track,
 ) -> Result<songbird::tracks::TrackHandle, Error> {
-    let stream = songbird::input::Input::Lazy(Box::new(crate::ffmpeg_spool::FfmpegStream::new(
-        &track.stream_url,
-        ctx.data().spool_read_ahead_bytes,
-    )));
+    enqueue_track_at(ctx, handler, track, Duration::ZERO).await
+}
+
+async fn enqueue_track_at(
+    ctx: &Context<'_>,
+    handler: &mut songbird::Call,
+    track: &crate::track::Track,
+    start_position: Duration,
+) -> Result<songbird::tracks::TrackHandle, Error> {
+    let ffmpeg_stream = if start_position.is_zero() {
+        crate::ffmpeg_spool::FfmpegStream::new(&track.stream_url, ctx.data().spool_read_ahead_bytes)
+    } else {
+        crate::ffmpeg_spool::FfmpegStream::new_at(
+            &track.stream_url,
+            ctx.data().spool_read_ahead_bytes,
+            start_position,
+        )
+    };
+    let stream = songbird::input::Input::Lazy(Box::new(ffmpeg_stream));
     let data = std::sync::Arc::new(track.clone());
     let songbird_track = songbird::tracks::Track::new_with_data(stream, data);
 
@@ -852,6 +967,114 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
     };
     let handler = handler_lock.lock().await;
     ctx.say(resume_playback_message(&handler).await?).await?;
+
+    Ok(())
+}
+
+/// Seek the current track to a given position.
+#[poise::command(
+    slash_command,
+    prefix_command,
+    guild_only,
+    aliases("jump", "seekto", "go", "goto")
+)]
+pub async fn seek(
+    ctx: Context<'_>,
+    #[description = "Position as seconds, mm:ss, or hh:mm:ss"]
+    #[rest]
+    position: String,
+) -> Result<(), Error> {
+    let position = match parse_seek_position(&position) {
+        Ok(position) => position,
+        Err(message) => {
+            ctx.say(message).await?;
+            return Ok(());
+        }
+    };
+
+    let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
+        return Ok(());
+    };
+
+    let queue = {
+        let handler = handler_lock.lock().await;
+        handler.queue().current_queue()
+    };
+
+    let Some(current_handle) = queue.first() else {
+        ctx.say("No track is currently playing.").await?;
+        return Ok(());
+    };
+
+    let current_uuid = current_handle.uuid();
+    let track = current_handle.data::<crate::track::Track>().clone();
+    if position.as_secs() > track.duration as u64 {
+        ctx.say(format!(
+            "Seek position is past the end of the current track ({}).",
+            format_duration_seconds(track.duration as u64)
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    let track_info = match tokio::time::timeout(TRACK_INFO_TIMEOUT, current_handle.get_info()).await
+    {
+        Ok(Ok(track_info)) => Some(track_info),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Failed to get current track info before seek");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("Timed out getting current track info before seek");
+            None
+        }
+    };
+    let volume = track_info
+        .as_ref()
+        .map_or(1.0, |track_info| track_info.volume);
+    let was_paused = track_info
+        .as_ref()
+        .is_some_and(|track_info| track_info.playing == PlayMode::Pause);
+    let up_next = queue[1..]
+        .iter()
+        .map(|track_handle| track_handle.data::<crate::track::Track>().clone())
+        .collect::<Vec<_>>();
+
+    let new_handle = {
+        let mut handler = handler_lock.lock().await;
+        if handler
+            .queue()
+            .current()
+            .is_none_or(|track_handle| track_handle.uuid() != current_uuid)
+        {
+            None
+        } else {
+            handler.queue().stop();
+            let new_handle = enqueue_track_at(&ctx, &mut handler, &track, position).await?;
+            for track in &up_next {
+                let _ = enqueue_track(&ctx, &mut handler, track).await?;
+            }
+
+            Some(new_handle)
+        }
+    };
+
+    let Some(new_handle) = new_handle else {
+        ctx.say("The current track changed before seek could be applied.")
+            .await?;
+        return Ok(());
+    };
+
+    let _ = new_handle.set_volume(volume);
+    if was_paused {
+        let _ = new_handle.pause();
+    }
+
+    ctx.say(format!(
+        "Seeked to {}.",
+        format_duration_seconds(position.as_secs())
+    ))
+    .await?;
 
     Ok(())
 }
