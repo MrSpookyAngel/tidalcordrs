@@ -69,7 +69,7 @@ fn help_message(prefix: &str) -> String {
             "`/play <query-or-url>` or `{0}play <query-or-url>` (`{0}p`) - Queue a song, album, playlist, Tidal URL, or supported YouTube URL.\n",
             "`/pause` or `{0}pause` (`{0}wait`) - Pause the current track.\n",
             "`/resume` or `{0}resume` (`{0}unpause`, `{0}continue`) - Resume playback.\n",
-            "`/seek <position>` or `{0}seek <position>` (`{0}jump`, `{0}seekto`, `{0}go`, `{0}goto`) - Seek the current track to `seconds`, `mm:ss`, or `hh:mm:ss`.\n",
+            "`/seek <position>` or `{0}seek <position>` (`{0}seekto`, `{0}jump`, `{0}jumpto`, `{0}go`, `{0}goto`) - Seek the current track to `seconds`, `mm:ss`, or `hh:mm:ss`.\n",
             "`/skip` or `{0}skip` (`{0}s`, `{0}next`) - Skip the current track.\n",
             "`/playnext <query-or-url>` or `{0}playnext <query-or-url>` - Insert a song, album, playlist, Tidal URL, or supported YouTube URL right after the current track.\n",
             "`/shuffle` or `{0}shuffle` - Shuffle the queued tracks.\n",
@@ -976,7 +976,7 @@ pub async fn resume(ctx: Context<'_>) -> Result<(), Error> {
     slash_command,
     prefix_command,
     guild_only,
-    aliases("jump", "seekto", "go", "goto")
+    aliases("seekto", "jump", "jumpto", "go", "goto")
 )]
 pub async fn seek(
     ctx: Context<'_>,
