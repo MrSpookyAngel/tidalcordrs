@@ -65,16 +65,16 @@ fn help_message(prefix: &str) -> String {
     format!(
         concat!(
             "**Available Commands**\n",
-            "`/help` or `{0}help` - Show this help message.\n",
+            "`/help` or `{0}help` (`{0}commands`, `{0}cmds`) - Show this help message.\n",
             "`/ping` or `{0}ping` - Check whether the bot is responding.\n",
-            "`/join` or `{0}join` (`{0}j`) - Join your current voice channel.\n",
+            "`/join` or `{0}join` (`{0}j`, `{0}summon`, `{0}connect`) - Join your current voice channel.\n",
             "`/volume [0-200]` or `{0}volume [0-200]` (`{0}vol`) - Show or set the playback volume.\n",
             "`/play <query-or-url>` or `{0}play <query-or-url>` (`{0}p`) - Queue a song, album, playlist, Tidal URL, or supported YouTube URL.\n",
             "`/pause` or `{0}pause` (`{0}wait`) - Pause the current track.\n",
             "`/resume` or `{0}resume` (`{0}unpause`, `{0}continue`) - Resume playback.\n",
             "`/skip` or `{0}skip` (`{0}s`, `{0}next`) - Skip the current track.\n",
-            "`/stop` or `{0}stop` - Stop playback and clear the queue.\n",
-            "`/current` or `{0}current` (`{0}currentplaying`, `{0}now`, `{0}nowplaying`, `{0}playing`) - Show the current track.\n",
+            "`/stop` or `{0}stop` (`{0}clear`) - Stop playback and clear the queue.\n",
+            "`/current` or `{0}current` (`{0}currentplaying`, `{0}now`, `{0}nowplaying`, `{0}playing`, `{0}np`) - Show the current track.\n",
             "`/leave` or `{0}leave` (`{0}disconnect`) - Disconnect from voice.\n",
             "`/queue` or `{0}queue` (`{0}q`, `{0}list`, `{0}l`) - Show the current queue."
         ),
@@ -133,7 +133,7 @@ pub async fn ping(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Show the list of available commands and how to use them.
-#[poise::command(slash_command, prefix_command, aliases("commands"), guild_only)]
+#[poise::command(slash_command, prefix_command, aliases("commands", "cmds"), guild_only)]
 pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
     ctx.say(help_message(&ctx.data().command_prefix)).await?;
     Ok(())
@@ -279,7 +279,12 @@ async fn resume_playback_message(handler: &songbird::Call) -> Result<&'static st
 }
 
 /// Join the voice channel you are currently in.
-#[poise::command(slash_command, prefix_command, aliases("j"), guild_only)]
+#[poise::command(
+    slash_command,
+    prefix_command,
+    aliases("j", "summon", "connect"),
+    guild_only
+)]
 pub async fn join(ctx: Context<'_>) -> Result<(), Error> {
     // Attempt to join the voice channel if not already connected
     if let Some(state) = try_join_voice_channel(ctx).await? {
@@ -507,7 +512,7 @@ pub async fn skip(ctx: Context<'_>) -> Result<(), Error> {
 }
 
 /// Stop playback and clear the queue.
-#[poise::command(slash_command, prefix_command, guild_only)]
+#[poise::command(slash_command, prefix_command, aliases("clear"), guild_only)]
 pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
     let Some(handler_lock) = voice_call(ctx, "Not connected to a voice channel.").await? else {
         return Ok(());
@@ -527,7 +532,7 @@ pub async fn stop(ctx: Context<'_>) -> Result<(), Error> {
 #[poise::command(
     slash_command,
     prefix_command,
-    aliases("currentplaying", "now", "nowplaying", "playing"),
+    aliases("currentplaying", "now", "nowplaying", "playing", "np"),
     guild_only
 )]
 pub async fn current(ctx: Context<'_>) -> Result<(), Error> {
