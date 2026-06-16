@@ -156,6 +156,7 @@ async fn run() -> Result<(), commands::Error> {
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
             commands: vec![
+                commands::help(),
                 commands::ping(),
                 commands::join(),
                 commands::volume(),
@@ -169,7 +170,7 @@ async fn run() -> Result<(), commands::Error> {
                 commands::queue(),
             ],
             prefix_options: poise::PrefixFrameworkOptions {
-                prefix: Some(prefix),
+                prefix: Some(prefix.clone()),
                 ..Default::default()
             },
             event_handler: |ctx, event, framework, data| {
@@ -192,6 +193,7 @@ async fn run() -> Result<(), commands::Error> {
                     session: tokio::sync::Mutex::new(tidal_session),
                     spool_read_ahead_bytes,
                     collection_track_fetch_concurrency,
+                    command_prefix: prefix.clone(),
                 })
             })
         })
