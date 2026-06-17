@@ -11,11 +11,15 @@ services:
 
       # Configuration (change these if you want)
       COMMAND_PREFIX: "${COMMAND_PREFIX:-!}"
+      BOT_PROFILE_SYNC_ENABLED: "${BOT_PROFILE_SYNC_ENABLED:-true}"
+      BOT_NAME: "${BOT_NAME:-TidalCordRS}"
+      BOT_AVATAR_PATH: "${BOT_AVATAR_PATH:-}"
       TZ: "${TZ:-UTC}"
 
       # Technical Configuration (only change these if you know what you're doing)
       SPOOL_READ_AHEAD_MIB: "${SPOOL_READ_AHEAD_MIB:-16}"
       COLLECTION_TRACK_FETCH_CONCURRENCY: "${COLLECTION_TRACK_FETCH_CONCURRENCY:-8}"
+      BOT_PROFILE_STATE_PATH: "${BOT_PROFILE_STATE_PATH:-data/bot_profile_state.json}"
       TIDAL_TOKEN_SESSION_PATH: "${TIDAL_TOKEN_SESSION_PATH:-data/tidal_token.json}"
       TIDAL_CLIENT_ID: "${TIDAL_CLIENT_ID:-fX2JxdmntZWK0ixT}"
       TIDAL_CLIENT_SECRET: "${TIDAL_CLIENT_SECRET:-1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg=}"

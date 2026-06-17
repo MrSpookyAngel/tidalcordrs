@@ -48,6 +48,9 @@ The creator of this project is not responsible for any misuse or violations of t
 4. Download the [`example.env`](https://github.com/MrSpookyAngel/tidalcordrs/blob/main/example.env) and place it inside the empty folder
    * Rename `example.env` to `.env`
 5. Update the `.env` as needed, but only the `DISCORD_TOKEN` is required to update from the default
+   * Set `BOT_PROFILE_SYNC_ENABLED="false"` if you do not want the bot to update its Discord profile on startup
+   * `BOT_NAME` can optionally control the bot's default Discord profile name
+   * `BOT_AVATAR_PATH` can optionally point to a custom avatar image; otherwise the built-in default avatar is used
    * Set `TZ` to your local timezone if you want logs to use your computer's timezone, for example `TZ="America/Los_Angeles"`
 6. Run the program
 7. Visit the Tidal link shown in the console and authorize the device

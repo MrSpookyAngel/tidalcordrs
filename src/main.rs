@@ -5,8 +5,39 @@ mod track;
 mod url_handler;
 
 use poise::serenity_prelude as serenity;
+use serde::{Deserialize, Serialize};
 use songbird::SerenityInit;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+const DEFAULT_BOT_NAME: &str = "TidalCordRS";
+const DEFAULT_BOT_PROFILE_STATE_PATH: &str = "data/bot_profile_state.json";
+const DEFAULT_BOT_AVATAR_FILE_NAME: &str = "default-avatar.png";
+const DEFAULT_BOT_AVATAR_SOURCE: &str = "embedded:default-avatar.png";
+const DEFAULT_BOT_AVATAR_BYTES: &[u8] = include_bytes!("../assets/default-avatar.png");
+
+#[derive(Clone, Debug)]
+struct BotProfileConfig {
+    enabled: bool,
+    name: String,
+    avatar_path: Option<PathBuf>,
+    state_path: PathBuf,
+}
+
+#[derive(Debug)]
+struct BotProfileAvatar {
+    bytes: Vec<u8>,
+    file_name: String,
+    source: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct BotProfileState {
+    bot_name: Option<String>,
+    avatar_source: Option<String>,
+    avatar_fingerprint: Option<String>,
+    discord_avatar_hash: Option<String>,
+}
 
 async fn event_handler(
     ctx: &serenity::Context,
@@ -117,6 +148,23 @@ fn required_env(name: &str) -> Result<String, commands::Error> {
     }
 }
 
+fn optional_env(name: &str, default: &str) -> Result<String, commands::Error> {
+    match std::env::var(name) {
+        Ok(value) => Ok(value),
+        Err(std::env::VarError::NotPresent) => Ok(default.to_string()),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
+    }
+}
+
+fn optional_nonempty_env(name: &str) -> Result<Option<String>, commands::Error> {
+    match std::env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
+    }
+}
+
 fn optional_env_parse<T>(name: &str, default: T) -> Result<T, commands::Error>
 where
     T: std::str::FromStr,
@@ -131,6 +179,163 @@ where
     }
 }
 
+impl BotProfileConfig {
+    fn from_env() -> Result<Self, commands::Error> {
+        let name = optional_env("BOT_NAME", DEFAULT_BOT_NAME)?;
+        if name.trim().is_empty() {
+            return Err("BOT_NAME must not be empty".into());
+        }
+
+        Ok(Self {
+            enabled: optional_env_parse("BOT_PROFILE_SYNC_ENABLED", true)?,
+            name,
+            avatar_path: optional_nonempty_env("BOT_AVATAR_PATH")?.map(PathBuf::from),
+            state_path: PathBuf::from(optional_env(
+                "BOT_PROFILE_STATE_PATH",
+                DEFAULT_BOT_PROFILE_STATE_PATH,
+            )?),
+        })
+    }
+}
+
+async fn sync_bot_profile(
+    ctx: &serenity::Context,
+    ready_user: &serenity::CurrentUser,
+    config: &BotProfileConfig,
+) -> Result<serenity::CurrentUser, commands::Error> {
+    if !config.enabled {
+        tracing::info!(user = %ready_user.name, "Bot profile sync disabled");
+        return Ok(ready_user.clone());
+    }
+
+    let avatar = load_bot_profile_avatar(config).await?;
+    let avatar_fingerprint = fingerprint_bytes(&avatar.bytes);
+    let state = read_bot_profile_state(&config.state_path)?;
+    let current_avatar_hash = ready_user.avatar.as_ref().map(ToString::to_string);
+
+    let should_update_name = ready_user.name != config.name;
+    let avatar_is_current = match (
+        state.avatar_fingerprint.as_deref(),
+        state.discord_avatar_hash.as_deref(),
+        current_avatar_hash.as_deref(),
+    ) {
+        (Some(stored_fingerprint), Some(stored_discord_hash), Some(current_discord_hash)) => {
+            stored_fingerprint == avatar_fingerprint && stored_discord_hash == current_discord_hash
+        }
+        _ => false,
+    };
+    let should_update_avatar = !avatar_is_current;
+
+    if !should_update_name && !should_update_avatar {
+        return Ok(ready_user.clone());
+    }
+
+    let mut edit_profile = serenity::EditProfile::new();
+    if should_update_name {
+        edit_profile = edit_profile.username(config.name.clone());
+    }
+
+    let avatar_attachment = should_update_avatar
+        .then(|| serenity::CreateAttachment::bytes(avatar.bytes, avatar.file_name));
+    if let Some(avatar_attachment) = &avatar_attachment {
+        edit_profile = edit_profile.avatar(avatar_attachment);
+    }
+
+    let mut current_user = ready_user.clone();
+    current_user
+        .edit(ctx, edit_profile)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to update Discord bot profile for {}: {error}",
+                current_user.name
+            )
+        })?;
+
+    let updated_avatar_hash = current_user.avatar.as_ref().map(ToString::to_string);
+    write_bot_profile_state(
+        &config.state_path,
+        &BotProfileState {
+            bot_name: Some(config.name.clone()),
+            avatar_source: Some(avatar.source),
+            avatar_fingerprint: Some(avatar_fingerprint),
+            discord_avatar_hash: updated_avatar_hash,
+        },
+    )?;
+
+    if should_update_name && should_update_avatar {
+        tracing::info!(user = %current_user.name, "Updated bot name and avatar");
+    } else if should_update_name {
+        tracing::info!(user = %current_user.name, "Updated bot name");
+    } else {
+        tracing::info!(user = %current_user.name, "Updated bot avatar");
+    }
+
+    Ok(current_user)
+}
+
+async fn load_bot_profile_avatar(
+    config: &BotProfileConfig,
+) -> Result<BotProfileAvatar, commands::Error> {
+    let Some(avatar_path) = &config.avatar_path else {
+        return Ok(BotProfileAvatar {
+            bytes: DEFAULT_BOT_AVATAR_BYTES.to_vec(),
+            file_name: DEFAULT_BOT_AVATAR_FILE_NAME.to_string(),
+            source: DEFAULT_BOT_AVATAR_SOURCE.to_string(),
+        });
+    };
+
+    let bytes = tokio::fs::read(avatar_path).await.map_err(|error| {
+        format!(
+            "Failed to read BOT_AVATAR_PATH {}: {error}",
+            avatar_path.display()
+        )
+    })?;
+    let file_name = avatar_path
+        .file_name()
+        .ok_or("BOT_AVATAR_PATH must point to a file")?
+        .to_string_lossy()
+        .to_string();
+
+    Ok(BotProfileAvatar {
+        bytes,
+        file_name,
+        source: avatar_path.display().to_string(),
+    })
+}
+
+fn read_bot_profile_state(path: &Path) -> Result<BotProfileState, commands::Error> {
+    match std::fs::File::open(path) {
+        Ok(file) => Ok(serde_json::from_reader(file)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(BotProfileState::default())
+        }
+        Err(error) => Err(format!("Failed to read {}: {error}", path.display()).into()),
+    }
+}
+
+fn write_bot_profile_state(path: &Path, state: &BotProfileState) -> Result<(), commands::Error> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let file = std::fs::File::create(path)
+        .map_err(|error| format!("Failed to create {}: {error}", path.display()))?;
+    serde_json::to_writer_pretty(file, state)?;
+    Ok(())
+}
+
+fn fingerprint_bytes(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
 async fn run() -> Result<(), commands::Error> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -138,6 +343,7 @@ async fn run() -> Result<(), commands::Error> {
     dotenvy::dotenv_override().ok();
     let token = required_env("DISCORD_TOKEN")?;
     let prefix = required_env("COMMAND_PREFIX")?;
+    let bot_profile_config = BotProfileConfig::from_env()?;
     let spool_read_ahead_bytes = optional_env_parse::<u64>("SPOOL_READ_AHEAD_MIB", 16)?
         .checked_mul(1024 * 1024)
         .ok_or("SPOOL_READ_AHEAD_MIB is too large")?;
@@ -193,6 +399,8 @@ async fn run() -> Result<(), commands::Error> {
         })
         .setup(move |ctx, ready, framework| {
             Box::pin(async move {
+                let current_user = sync_bot_profile(ctx, &ready.user, &bot_profile_config).await?;
+
                 for guild_status in &ready.guilds {
                     poise::builtins::register_in_guild(
                         ctx,
@@ -201,7 +409,7 @@ async fn run() -> Result<(), commands::Error> {
                     )
                     .await?;
                 }
-                tracing::info!(user = %ready.user.name, version, "Bot connected");
+                tracing::info!(user = %current_user.name, version, "Bot connected");
                 Ok(commands::Data {
                     session: tokio::sync::Mutex::new(tidal_session),
                     spool_read_ahead_bytes,
