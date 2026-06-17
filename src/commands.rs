@@ -18,6 +18,7 @@ pub type Context<'a> = poise::Context<'a, Data, Error>;
 const QUEUE_PAGE_SIZE: usize = 10;
 const SEARCH_RESULT_LIMIT: u32 = 50;
 const SEARCH_SELECTION_TIMEOUT: Duration = Duration::from_secs(120);
+const QUEUE_PAGINATION_TIMEOUT: Duration = Duration::from_secs(120);
 const TRACK_INFO_TIMEOUT: Duration = Duration::from_secs(2);
 const ACTIVITY_NAME_MAX_CHARS: usize = 128;
 
@@ -272,7 +273,6 @@ fn help_message(prefix: &str) -> String {
             "`/current` or `{0}current` (`{0}currentplaying`, `{0}now`, `{0}nowplaying`, `{0}playing`, `{0}np`) - Show the current track.\n",
             "`/leave` or `{0}leave` (`{0}disconnect`) - Disconnect from voice.\n",
             "`/queue` or `{0}queue` (`{0}q`, `{0}list`, `{0}l`) - Show the current queue.\n",
-            "`{0}queue page <n>` - Show a later queue page."
         ),
         prefix
     )
@@ -1095,6 +1095,41 @@ fn format_queue_message(
     }
 
     Ok(message)
+}
+
+fn queue_prev_id(ctx_id: u64) -> String {
+    format!("queue:{ctx_id}:prev")
+}
+
+fn queue_next_id(ctx_id: u64) -> String {
+    format!("queue:{ctx_id}:next")
+}
+
+fn queue_component_prefix(ctx_id: u64) -> String {
+    format!("queue:{ctx_id}:")
+}
+
+fn queue_components(
+    ctx_id: u64,
+    queue: &[songbird::tracks::TrackHandle],
+    page: usize,
+) -> Result<Vec<serenity::all::CreateActionRow>, String> {
+    let up_next_count = queue.len().saturating_sub(1);
+    let (_, _, total_pages) = queue_page_bounds(up_next_count, page)?;
+    if total_pages <= 1 {
+        return Ok(vec![]);
+    }
+
+    Ok(vec![serenity::all::CreateActionRow::Buttons(vec![
+        serenity::all::CreateButton::new(queue_prev_id(ctx_id))
+            .label("Previous")
+            .style(serenity::all::ButtonStyle::Secondary)
+            .disabled(page <= 1),
+        serenity::all::CreateButton::new(queue_next_id(ctx_id))
+            .label("Next")
+            .style(serenity::all::ButtonStyle::Secondary)
+            .disabled(page >= total_pages),
+    ])])
 }
 
 fn search_select_id(ctx_id: u64) -> String {
@@ -2187,7 +2222,7 @@ pub async fn leave(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// Show the current queue and what is up next.
+/// Show the current queue.
 #[poise::command(slash_command, prefix_command, aliases("q", "list", "l"), guild_only)]
 pub async fn queue(
     ctx: Context<'_>,
@@ -2201,6 +2236,8 @@ pub async fn queue(
     let handler = handler_lock.lock().await;
 
     let queue = handler.queue().current_queue();
+    drop(handler);
+
     let repeat_mode = current_repeat_mode(ctx).await?.unwrap_or(RepeatMode::Off);
     let page = match parse_queue_page_request(page.as_deref()) {
         Ok(page) => page,
@@ -2210,10 +2247,80 @@ pub async fn queue(
         }
     };
 
-    match format_queue_message(&queue, page, repeat_mode) {
-        Ok(message) => ctx.say(message).await?,
-        Err(message) => ctx.say(message).await?,
+    let message = match format_queue_message(&queue, page, repeat_mode) {
+        Ok(message) => message,
+        Err(message) => {
+            ctx.say(message).await?;
+            return Ok(());
+        }
     };
+
+    let components = queue_components(ctx.id(), &queue, page).map_err(Error::from)?;
+    if components.is_empty() {
+        ctx.say(message).await?;
+        return Ok(());
+    }
+
+    let ctx_id = ctx.id();
+    let prev_id = queue_prev_id(ctx_id);
+    let next_id = queue_next_id(ctx_id);
+    let component_prefix = queue_component_prefix(ctx_id);
+    let mut page = page;
+
+    let reply = ctx
+        .send(
+            CreateReply::default()
+                .content(message)
+                .components(components),
+        )
+        .await?;
+
+    let message_id = {
+        let message = reply.message().await?;
+        message.id
+    };
+
+    while let Some(press) = serenity::all::ComponentInteractionCollector::new(ctx)
+        .author_id(ctx.author().id)
+        .channel_id(ctx.channel_id())
+        .message_id(message_id)
+        .timeout(QUEUE_PAGINATION_TIMEOUT)
+        .filter({
+            let component_prefix = component_prefix.clone();
+            move |press| press.data.custom_id.starts_with(&component_prefix)
+        })
+        .await
+    {
+        let custom_id = press.data.custom_id.as_str();
+        if custom_id != prev_id && custom_id != next_id {
+            continue;
+        }
+
+        let up_next_count = queue.len().saturating_sub(1);
+        let (_, _, total_pages) = queue_page_bounds(up_next_count, page).map_err(Error::from)?;
+        if custom_id == prev_id && page > 1 {
+            page -= 1;
+        } else if custom_id == next_id && page < total_pages {
+            page += 1;
+        }
+
+        press
+            .create_response(
+                ctx.serenity_context(),
+                serenity::all::CreateInteractionResponse::UpdateMessage(
+                    serenity::all::CreateInteractionResponseMessage::new()
+                        .content(
+                            format_queue_message(&queue, page, repeat_mode).map_err(Error::from)?,
+                        )
+                        .components(queue_components(ctx_id, &queue, page).map_err(Error::from)?),
+                ),
+            )
+            .await?;
+    }
+
+    if let Err(error) = reply.delete(ctx).await {
+        tracing::warn!(%error, "Failed to delete expired queue message");
+    }
 
     Ok(())
 }
