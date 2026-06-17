@@ -1,59 +1,204 @@
 # TidalCordRS
 
-**TidalCordRS** is a Discord music bot built in Rust.
-It's the sequel to [TidalCord](https://github.com/MrSpookyAngel/TidalCord).
-It allows you to retrieve music from Tidal and play it in your Discord server.
-**Tidal Premium account required.**
+TidalCordRS is a Discord music bot for playing music from Tidal in a Discord voice channel. It is written in Rust and supports both slash commands, like `/play`, and prefix commands, like `!play`.
 
----
+This is the Rust sequel to [TidalCord](https://github.com/MrSpookyAngel/TidalCord).
 
-## Disclaimer
+> [!IMPORTANT]
+> A Tidal Premium account is required.
 
-TidalCordRS might go against the terms of service of Tidal.
-By using this software, you accept full responsibility for any potential issues, including account bans or other consequences.
-The creator of this project is not responsible for any misuse or violations of third-party terms of service.
+## Before You Start
 
----
+You will need:
 
-## Retrieve your Discord Token
+- A Discord server where you can add bots
+- A Discord bot token
+- A Tidal Premium account
+- FFmpeg installed, unless you run the bot with Docker
+- A downloaded release, Docker, or a local Rust toolchain
 
-1. Visit the [Discord developer portal](https://discord.com/developers/applications)
-2. Create a new application and enter whatever you want to name your bot
-3. Go to the `Bot` tab
-   * Your current URL should look like this: `https://discord.com/developers/applications/<bot-id>/bot`
-4. Under the `Privileged Gateway Intents` section, enable the following intents:
-   * `Server Members Intent`
-   * `Message Content Intent`
-5. Remember to click `Save Changes`
-6. Click `Reset Token` and take note of your token
-   * This token should be added to your `.env` as `DISCORD_TOKEN`
+## Terms Notice
 
-## Add the Discord Bot to your Server
+TidalCordRS may violate Tidal's terms of service. By using this project, you accept responsibility for any consequences, including account restrictions or bans. The project creator is not responsible for misuse or third-party terms-of-service violations.
 
-1. Visit the [Discord developer portal](https://discord.com/developers/applications)
-2. Click on your bot application
-3. Go to the `OAuth2` tab
-4. Under the `Client Information` section and take note of your `Client ID`
-5. Copy and paste this URL into your browser: `https://discord.com/oauth2/authorize?client_id=<your-client-id>&permissions=36776960&integration_type=0&scope=bot`
-   * Replace `<your-client-id>` with your actual `Client ID`
-6. You should now be prompted to add the bot to one of your servers
+## Quick Start
 
-## How to Run
+1. Create a Discord bot and copy its token.
+2. Invite the bot to your Discord server.
+3. Copy `example.env` to `.env`.
+4. Put your Discord bot token in `.env`.
+5. Start TidalCordRS.
+6. Open the Tidal authorization link printed in the console.
+7. Join a voice channel and try `/play <song name>`.
 
-0. Retrieve your Discord Token and add the bot your server
-1. Install [FFmpeg](https://ffmpeg.org/) to your system PATH
-   * If you're struggling with this, then search for "FFmpeg system PATH <your operating system\>" online for more information
-2. Create an empty folder on your computer
-3. Download a [release](https://github.com/MrSpookyAngel/tidalcordrs/releases) and place it inside the empty folder
-4. Download the [`example.env`](https://github.com/MrSpookyAngel/tidalcordrs/blob/main/example.env) and place it inside the empty folder
-   * Rename `example.env` to `.env`
-5. Update the `.env` as needed, but only the `DISCORD_TOKEN` is required to update from the default
-   * Set `BOT_PROFILE_SYNC_ENABLED="false"` if you do not want the bot to update its Discord profile on startup
-   * `BOT_NAME` can optionally control the bot's default Discord profile name
-   * `BOT_AVATAR_PATH` can optionally point to a custom avatar image; otherwise the built-in default avatar is used
-   * Set `TZ` to your local timezone if you want logs to use your computer's timezone, for example `TZ="America/Los_Angeles"`
-6. Run the program
-7. Visit the Tidal link shown in the console and authorize the device
-   * After authorizing, the console will say that your bot is connected
-8. Check out the [wiki](https://github.com/MrSpookyAngel/tidalcordrs/wiki) to view available commands and their usage
----
+The detailed steps below walk through each part.
+
+## Create a Discord Bot
+
+1. Open the [Discord developer portal](https://discord.com/developers/applications).
+2. Select **New Application**.
+3. Give the application a name, then create it.
+4. Open the **Bot** tab.
+5. Under **Privileged Gateway Intents**, enable:
+   - **Server Members Intent**
+   - **Message Content Intent**
+6. Select **Save Changes**.
+7. Select **Reset Token** and copy the new token.
+
+Keep this token private. Anyone with the token can control your bot.
+
+## Invite the Bot to Your Server
+
+1. In the Discord developer portal, open your application.
+2. Open the **OAuth2** tab.
+3. Copy the **Client ID**.
+4. Open this URL in your browser, replacing `<your-client-id>` with the Client ID:
+
+   ```text
+   https://discord.com/oauth2/authorize?client_id=<your-client-id>&permissions=36776960&integration_type=0&scope=bot%20applications.commands
+   ```
+
+5. Choose the server you want to add the bot to.
+
+## Configure the Bot
+
+Create a `.env` file beside the bot executable or beside `docker-compose.yml`.
+
+The easiest starting point is to copy the example file:
+
+```sh
+cp example.env .env
+```
+
+Then edit `.env` and set your Discord token:
+
+```env
+DISCORD_TOKEN="paste-your-discord-bot-token-here"
+```
+
+Common settings:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | Required | Your Discord bot token. |
+| `COMMAND_PREFIX` | `!` | Prefix for text commands, such as `!play`. |
+| `BOT_PROFILE_SYNC_ENABLED` | `true` | Updates the bot profile name and avatar on startup. |
+| `BOT_NAME` | `TidalCordRS` | Optional bot display name used when profile sync is enabled. |
+| `BOT_AVATAR_PATH` | Built-in avatar | Optional path to a custom avatar image. |
+| `TZ` | `UTC` | Timezone used in logs, such as `America/Los_Angeles`. |
+
+Most users only need to change `DISCORD_TOKEN`.
+
+## Run From a Release
+
+Use this option if you just want to run the bot.
+
+1. Install [FFmpeg](https://ffmpeg.org/) and make sure it is available in your system `PATH`.
+2. Create a folder for the bot.
+3. Download the latest release from the [releases page](https://github.com/MrSpookyAngel/tidalcordrs/releases).
+4. Put the release executable and `.env` file in the same folder.
+5. Start the executable:
+
+   ```sh
+   ./tidalcordrs
+   ```
+
+   On Windows, run:
+
+   ```powershell
+   .\tidalcordrs.exe
+   ```
+
+6. Follow the Tidal authorization link shown in the console.
+
+When authorization succeeds, the console will report that the bot is connected.
+
+## Run With Docker
+
+Docker includes FFmpeg, so you do not need to install FFmpeg separately.
+
+1. Copy `example.env` to `.env`.
+2. Set `DISCORD_TOKEN` in `.env`.
+3. Start the container:
+
+   ```sh
+   docker compose up -d
+   ```
+
+4. View the startup logs:
+
+   ```sh
+   docker compose logs -f tidalcordrs
+   ```
+
+5. Open the Tidal authorization link shown in the logs.
+
+TidalCordRS stores its Tidal session and profile state in the Docker volume named `app-data`.
+
+## Build From Source
+
+Use this option if you want to develop or run directly from the repository.
+
+1. Install Rust.
+2. Install FFmpeg and make sure it is available in your system `PATH`.
+3. Copy `example.env` to `.env`.
+4. Set `DISCORD_TOKEN` in `.env`.
+5. Run:
+
+   ```sh
+   cargo run --release
+   ```
+
+## First Commands to Try
+
+Join a Discord voice channel, then use either slash commands or prefix commands:
+
+```text
+/play Tennyson You
+/queue
+/skip
+/stop
+/help
+```
+
+With the default prefix, the same commands also work like this:
+
+```text
+!play Tennyson You
+!queue
+!skip
+!stop
+!help
+```
+
+For the full command list, use `/help` in Discord or visit the [wiki](https://github.com/MrSpookyAngel/tidalcordrs/wiki).
+
+## Troubleshooting
+
+**The bot starts, but commands do not work.**
+
+Make sure **Message Content Intent** is enabled in the Discord developer portal. Slash commands are registered when the bot connects to your server.
+
+**Slash commands do not appear in Discord.**
+
+Invite the bot again with the URL above. The invite URL must include the `applications.commands` scope.
+
+**The bot cannot play audio.**
+
+If you are not using Docker, make sure FFmpeg is installed and available in your system `PATH`.
+
+**The bot never joins voice.**
+
+Make sure the bot has permission to view channels, connect to voice channels, and speak in voice channels.
+
+**The Tidal authorization link expired.**
+
+Stop and restart the bot, then use the new authorization link printed in the console.
+
+**The bot profile changes on startup.**
+
+Set this in `.env` if you do not want TidalCordRS to update the bot name or avatar:
+
+```env
+BOT_PROFILE_SYNC_ENABLED="false"
+```
