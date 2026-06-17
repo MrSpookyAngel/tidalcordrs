@@ -374,6 +374,7 @@ async fn run() -> Result<(), commands::Error> {
                 commands::join(),
                 commands::volume(),
                 commands::play(),
+                commands::search(),
                 commands::playnext(),
                 commands::pause(),
                 commands::resume(),

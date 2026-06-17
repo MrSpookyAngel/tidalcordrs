@@ -921,6 +921,38 @@ impl Session {
         Ok(tracks)
     }
 
+    pub async fn search_track_summaries(
+        &mut self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<track::TrackSummary>, Error> {
+        async fn try_search(
+            this: &crate::session::Session,
+            query: &str,
+            limit: u32,
+        ) -> Result<SearchTracksResponse, Error> {
+            this.search_tracks(query, limit).await
+        }
+
+        let mut search_result = try_search(self, query, limit).await;
+
+        if search_result.is_err() {
+            self.refresh_token().await?;
+            search_result = try_search(self, query, limit).await;
+        }
+
+        let mut tracks = Vec::new();
+        for item in search_result?.tracks.items {
+            if item.is_video() {
+                continue;
+            }
+
+            tracks.push(item.summary()?);
+        }
+
+        Ok(tracks)
+    }
+
     pub async fn find_track_by_details(
         &mut self,
         title: &str,

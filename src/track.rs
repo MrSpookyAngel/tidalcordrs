@@ -41,6 +41,30 @@ impl TidalTrackResponse {
             .as_deref()
             .is_some_and(|item_type| item_type.eq_ignore_ascii_case("video"))
     }
+
+    pub fn summary(&self) -> Result<TrackSummary, Error> {
+        let artist = self
+            .artists
+            .first()
+            .ok_or("Expected at least one artist")?
+            .name
+            .clone();
+
+        let featured_artists = self
+            .artists
+            .iter()
+            .skip(1)
+            .map(|artist| artist.name.clone())
+            .collect();
+
+        Ok(TrackSummary {
+            id: self.id(),
+            title: self.title.clone(),
+            artist,
+            featured_artists,
+            duration: self.duration,
+        })
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -55,6 +79,15 @@ pub struct Track {
     pub featured_artists: Vec<String>, // Can be empty
     pub duration: u32,
     pub stream_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackSummary {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub featured_artists: Vec<String>,
+    pub duration: u32,
 }
 
 impl Track {

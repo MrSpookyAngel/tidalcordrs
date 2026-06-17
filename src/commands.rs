@@ -1,3 +1,4 @@
+use poise::CreateReply;
 use songbird::tracks::PlayMode;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -15,6 +16,8 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 pub type Context<'a> = poise::Context<'a, Data, Error>;
 
 const QUEUE_PAGE_SIZE: usize = 10;
+const SEARCH_RESULT_LIMIT: u32 = 50;
+const SEARCH_SELECTION_TIMEOUT: Duration = Duration::from_secs(120);
 const TRACK_INFO_TIMEOUT: Duration = Duration::from_secs(2);
 const ACTIVITY_NAME_MAX_CHARS: usize = 128;
 
@@ -200,26 +203,49 @@ impl songbird::events::EventHandler for PlaybackStatusNotifier {
     }
 }
 
-fn get_formatted_track(track: &crate::track::Track) -> String {
-    let duration = format_duration_seconds(track.duration as u64);
-    let featured = if track.featured_artists.is_empty() {
+fn format_track_parts(
+    artist: &str,
+    title: &str,
+    featured_artists: &[String],
+    duration_seconds: u32,
+) -> String {
+    let duration = format_duration_seconds(duration_seconds as u64);
+    let featured = if featured_artists.is_empty() {
         String::new()
     } else {
-        format!(" ft. {}", track.featured_artists.join(", "))
+        format!(" ft. {}", featured_artists.join(", "))
     };
-    let need_featured = !featured.is_empty()
-        && !track.title.to_lowercase().contains("feat.")
-        && !track.title.to_lowercase().contains("ft.");
+    let lower_title = title.to_lowercase();
+    let need_featured =
+        !featured.is_empty() && !lower_title.contains("feat.") && !lower_title.contains("ft.");
     format!(
         "{} - {}{} ({})",
-        track.artist,
-        track.title,
+        artist,
+        title,
         if need_featured {
             featured
         } else {
             String::new()
         },
         duration
+    )
+}
+
+fn get_formatted_track(track: &crate::track::Track) -> String {
+    format_track_parts(
+        &track.artist,
+        &track.title,
+        &track.featured_artists,
+        track.duration,
+    )
+}
+
+fn get_formatted_track_summary(track: &crate::track::TrackSummary) -> String {
+    format_track_parts(
+        &track.artist,
+        &track.title,
+        &track.featured_artists,
+        track.duration,
     )
 }
 
@@ -232,6 +258,7 @@ fn help_message(prefix: &str) -> String {
             "`/join` or `{0}join` (`{0}j`, `{0}summon`, `{0}connect`) - Join your current voice channel.\n",
             "`/volume [0-200]` or `{0}volume [0-200]` (`{0}vol`) - Show or set the playback volume.\n",
             "`/play <query-or-url>` or `{0}play <query-or-url>` (`{0}p`) - Queue a song, album, playlist, Tidal URL, or supported YouTube URL.\n",
+            "`/search <query>` or `{0}search <query>` - Search Tidal and choose which result to queue.\n",
             "`/pause` or `{0}pause` (`{0}wait`) - Pause the current track.\n",
             "`/resume` or `{0}resume` (`{0}unpause`, `{0}continue`) - Resume playback.\n",
             "`/seek <position>` or `{0}seek <position>` (`{0}seekto`, `{0}jump`, `{0}jumpto`, `{0}goto`) - Seek the current track to `seconds`, `mm:ss`, or `hh:mm:ss`.\n",
@@ -1070,6 +1097,153 @@ fn format_queue_message(
     Ok(message)
 }
 
+fn search_select_id(ctx_id: u64) -> String {
+    format!("search:{ctx_id}:select")
+}
+
+fn search_prev_id(ctx_id: u64) -> String {
+    format!("search:{ctx_id}:prev")
+}
+
+fn search_next_id(ctx_id: u64) -> String {
+    format!("search:{ctx_id}:next")
+}
+
+fn search_cancel_id(ctx_id: u64) -> String {
+    format!("search:{ctx_id}:cancel")
+}
+
+fn search_component_prefix(ctx_id: u64) -> String {
+    format!("search:{ctx_id}:")
+}
+
+fn format_search_message(
+    query: &str,
+    tracks: &[crate::track::TrackSummary],
+    page: usize,
+) -> Result<String, String> {
+    let (start, end, total_pages) = queue_page_bounds(tracks.len(), page)?;
+    let mut message = format!(
+        "**Search Results for:** {}\n**Page {page}/{total_pages}**\n\n",
+        truncate_chars(query, 120)
+    );
+
+    for (offset, track) in tracks.iter().skip(start).take(end - start).enumerate() {
+        let line = format!(
+            "{}. {}",
+            start + offset + 1,
+            get_formatted_track_summary(track)
+        );
+        message.push_str(&truncate_chars(&line, 180));
+        message.push('\n');
+    }
+
+    message.push_str("\nChoose a track from the menu below.");
+    if total_pages > 1 {
+        message.push_str(" Use Previous and Next to change pages.");
+    }
+
+    Ok(message)
+}
+
+fn search_result_components(
+    ctx_id: u64,
+    tracks: &[crate::track::TrackSummary],
+    page: usize,
+) -> Result<Vec<serenity::all::CreateActionRow>, String> {
+    let (start, end, total_pages) = queue_page_bounds(tracks.len(), page)?;
+    let options = tracks
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+        .map(|(index, track)| {
+            serenity::all::CreateSelectMenuOption::new(
+                truncate_chars(
+                    &format!("{}. {} - {}", index + 1, track.artist, track.title),
+                    100,
+                ),
+                index.to_string(),
+            )
+            .description(truncate_chars(
+                &format!(
+                    "Duration {}",
+                    format_duration_seconds(track.duration as u64)
+                ),
+                100,
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    let select = serenity::all::CreateSelectMenu::new(
+        search_select_id(ctx_id),
+        serenity::all::CreateSelectMenuKind::String { options },
+    )
+    .placeholder("Choose a track")
+    .min_values(1)
+    .max_values(1);
+
+    let mut components = vec![serenity::all::CreateActionRow::SelectMenu(select)];
+
+    let mut buttons = Vec::new();
+    if total_pages > 1 {
+        buttons.push(
+            serenity::all::CreateButton::new(search_prev_id(ctx_id))
+                .label("Previous")
+                .style(serenity::all::ButtonStyle::Secondary)
+                .disabled(page <= 1),
+        );
+        buttons.push(
+            serenity::all::CreateButton::new(search_next_id(ctx_id))
+                .label("Next")
+                .style(serenity::all::ButtonStyle::Secondary)
+                .disabled(page >= total_pages),
+        );
+    }
+    buttons.push(
+        serenity::all::CreateButton::new(search_cancel_id(ctx_id))
+            .label("Cancel")
+            .style(serenity::all::ButtonStyle::Danger),
+    );
+    components.push(serenity::all::CreateActionRow::Buttons(buttons));
+
+    Ok(components)
+}
+
+async fn find_search_summaries(
+    ctx: &Context<'_>,
+    query: &str,
+) -> Result<Vec<crate::track::TrackSummary>, Error> {
+    let mut session = ctx.data().session.lock().await;
+    session
+        .search_track_summaries(query, SEARCH_RESULT_LIMIT)
+        .await
+}
+
+async fn find_track_for_search_summary(
+    ctx: &Context<'_>,
+    track: &crate::track::TrackSummary,
+) -> Result<crate::track::Track, Error> {
+    let mut session = ctx.data().session.lock().await;
+    session.find_track_by_id(&track.id).await
+}
+
+async fn enqueue_selected_track(
+    ctx: &Context<'_>,
+    manager: &std::sync::Arc<songbird::Songbird>,
+    guild_id: serenity::model::id::GuildId,
+    track: &crate::track::Track,
+) -> Result<(), Error> {
+    let Some(handler_lock) = manager.get(guild_id) else {
+        return Err("Not connected to a voice channel.".into());
+    };
+
+    let mut handler = handler_lock.lock().await;
+    let _ = enqueue_track(ctx, &mut handler, track).await?;
+
+    Ok(())
+}
+
 /// Join the voice channel you are currently in.
 #[poise::command(
     slash_command,
@@ -1139,7 +1313,7 @@ async fn enqueue_track_at(
     track: &crate::track::Track,
     start_position: Duration,
 ) -> Result<songbird::tracks::TrackHandle, Error> {
-    let was_queue_empty = handler.queue().len() == 0;
+    let was_queue_empty = handler.queue().is_empty();
     let handle = enqueue_track_with_spool(
         handler,
         track,
@@ -1304,6 +1478,208 @@ pub async fn play(
         ctx.say("Not connected to a voice channel.").await?;
         return Ok(());
     }
+
+    Ok(())
+}
+
+/// Search Tidal and choose which result to queue.
+#[poise::command(slash_command, prefix_command, guild_only)]
+pub async fn search(
+    ctx: Context<'_>,
+    #[description = "Search query"]
+    #[rest]
+    query: String,
+) -> Result<(), Error> {
+    if try_join_voice_channel(ctx).await?.is_none() {
+        return Ok(());
+    }
+
+    let Some((guild_id, manager)) = guild_voice_manager(ctx).await? else {
+        return Ok(());
+    };
+
+    tracing::info!(
+        guild_id = %guild_id,
+        user_id = %ctx.author().id,
+        user = %ctx.author().name,
+        query = %query,
+        "User interactive search"
+    );
+
+    let _ = ctx.defer().await;
+
+    let tracks = find_search_summaries(&ctx, &query).await?;
+    if tracks.is_empty() {
+        ctx.say("No track was found on Tidal.").await?;
+        return Ok(());
+    }
+
+    if tracks.len() == 1 {
+        let track = find_track_for_search_summary(&ctx, &tracks[0]).await?;
+        enqueue_selected_track(&ctx, &manager, guild_id, &track).await?;
+        ctx.say(format!(
+            "{} added **{}** to the queue.",
+            ctx.author().name,
+            get_formatted_track(&track)
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    let ctx_id = ctx.id();
+    let mut page = 1;
+    let select_id = search_select_id(ctx_id);
+    let prev_id = search_prev_id(ctx_id);
+    let next_id = search_next_id(ctx_id);
+    let cancel_id = search_cancel_id(ctx_id);
+    let component_prefix = search_component_prefix(ctx_id);
+
+    let reply = ctx
+        .send(
+            CreateReply::default()
+                .content(format_search_message(&query, &tracks, page).map_err(Error::from)?)
+                .components(search_result_components(ctx_id, &tracks, page).map_err(Error::from)?),
+        )
+        .await?;
+
+    let message_id = {
+        let message = reply.message().await?;
+        message.id
+    };
+
+    while let Some(press) = serenity::all::ComponentInteractionCollector::new(ctx)
+        .author_id(ctx.author().id)
+        .channel_id(ctx.channel_id())
+        .message_id(message_id)
+        .timeout(SEARCH_SELECTION_TIMEOUT)
+        .filter({
+            let component_prefix = component_prefix.clone();
+            move |press| press.data.custom_id.starts_with(&component_prefix)
+        })
+        .await
+    {
+        let custom_id = press.data.custom_id.as_str();
+
+        if custom_id == cancel_id {
+            press
+                .create_response(
+                    ctx.serenity_context(),
+                    serenity::all::CreateInteractionResponse::UpdateMessage(
+                        serenity::all::CreateInteractionResponseMessage::new()
+                            .content("Search cancelled.")
+                            .components(vec![]),
+                    ),
+                )
+                .await?;
+            return Ok(());
+        }
+
+        if custom_id == prev_id || custom_id == next_id {
+            let (_, _, total_pages) = queue_page_bounds(tracks.len(), page).map_err(Error::from)?;
+            if custom_id == prev_id && page > 1 {
+                page -= 1;
+            } else if custom_id == next_id && page < total_pages {
+                page += 1;
+            }
+
+            press
+                .create_response(
+                    ctx.serenity_context(),
+                    serenity::all::CreateInteractionResponse::UpdateMessage(
+                        serenity::all::CreateInteractionResponseMessage::new()
+                            .content(
+                                format_search_message(&query, &tracks, page)
+                                    .map_err(Error::from)?,
+                            )
+                            .components(
+                                search_result_components(ctx_id, &tracks, page)
+                                    .map_err(Error::from)?,
+                            ),
+                    ),
+                )
+                .await?;
+            continue;
+        }
+
+        if custom_id != select_id {
+            continue;
+        }
+
+        let selected_index = match &press.data.kind {
+            serenity::all::ComponentInteractionDataKind::StringSelect { values } => values
+                .first()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|index| *index < tracks.len()),
+            _ => None,
+        };
+
+        let Some(selected_index) = selected_index else {
+            press
+                .create_response(
+                    ctx.serenity_context(),
+                    serenity::all::CreateInteractionResponse::UpdateMessage(
+                        serenity::all::CreateInteractionResponseMessage::new()
+                            .content("That search selection is no longer available.")
+                            .components(vec![]),
+                    ),
+                )
+                .await?;
+            return Ok(());
+        };
+
+        let selected_track = tracks[selected_index].clone();
+        press
+            .create_response(
+                ctx.serenity_context(),
+                serenity::all::CreateInteractionResponse::UpdateMessage(
+                    serenity::all::CreateInteractionResponseMessage::new()
+                        .content(format!(
+                            "Adding **{}** to the queue...",
+                            get_formatted_track_summary(&selected_track)
+                        ))
+                        .components(vec![]),
+                ),
+            )
+            .await?;
+
+        let response = match find_track_for_search_summary(&ctx, &selected_track).await {
+            Ok(track) => match enqueue_selected_track(&ctx, &manager, guild_id, &track).await {
+                Ok(()) => format!(
+                    "{} added **{}** to the queue.",
+                    ctx.author().name,
+                    get_formatted_track(&track)
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "Failed to enqueue selected search track");
+                    "Failed to add that track to the queue.".to_string()
+                }
+            },
+            Err(error) => {
+                tracing::warn!(%error, track_id = %selected_track.id, "Failed to fetch selected search track");
+                "Failed to load that track from Tidal.".to_string()
+            }
+        };
+
+        press
+            .edit_response(
+                ctx.serenity_context(),
+                serenity::all::EditInteractionResponse::new()
+                    .content(response)
+                    .components(vec![]),
+            )
+            .await?;
+
+        return Ok(());
+    }
+
+    reply
+        .edit(
+            ctx,
+            CreateReply::default()
+                .content("Search timed out.")
+                .components(vec![]),
+        )
+        .await?;
 
     Ok(())
 }
