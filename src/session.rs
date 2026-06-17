@@ -1,7 +1,6 @@
 use crate::commands::Error;
+use crate::config::TidalConfig;
 use crate::track;
-
-pub const DEFAULT_COLLECTION_TRACK_FETCH_CONCURRENCY: usize = 8;
 
 #[derive(serde::Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -220,44 +219,9 @@ fn create_token_file(path: &str) -> std::io::Result<std::fs::File> {
 }
 
 #[derive(Debug)]
-pub struct Config {
-    tidal_client_id: String,
-    tidal_client_secret: String,
-    path_to_session: String,
-    pub user_agent: String,
-    oauth_device_auth_url: String,
-    oauth_token_url: String,
-    sessions_url: String,
-    search_url: String,
-}
-
-impl Config {
-    pub fn new() -> Result<Self, Error> {
-        Ok(Config {
-            tidal_client_id: required_env("TIDAL_CLIENT_ID")?,
-            tidal_client_secret: required_env("TIDAL_CLIENT_SECRET")?,
-            path_to_session: required_env("TIDAL_TOKEN_SESSION_PATH")?,
-            user_agent: required_env("USER_AGENT")?,
-            oauth_device_auth_url: required_env("OAUTH_DEVICE_AUTH_URL")?,
-            oauth_token_url: required_env("OAUTH_TOKEN_URL")?,
-            sessions_url: required_env("SESSIONS_URL")?,
-            search_url: required_env("SEARCH_URL")?,
-        })
-    }
-}
-
-fn required_env(name: &str) -> Result<String, Error> {
-    match std::env::var(name) {
-        Ok(value) => Ok(value),
-        Err(std::env::VarError::NotPresent) => Err(format!("{name} must be set").into()),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
-    }
-}
-
-#[derive(Debug)]
 pub struct Session {
     pub client: reqwest::Client,
-    config: Config,
+    config: TidalConfig,
     pub access_token: String,
     refresh_token: String,
     pub token_type: String,
@@ -267,10 +231,10 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn new() -> Result<Self, Error> {
+    pub async fn new(config: TidalConfig) -> Result<Self, Error> {
         let mut session = Session {
             client: reqwest::Client::new(),
-            config: Config::new()?,
+            config,
             access_token: String::new(),
             refresh_token: String::new(),
             token_type: String::new(),

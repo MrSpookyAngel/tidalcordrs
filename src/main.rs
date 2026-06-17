@@ -1,28 +1,20 @@
 mod commands;
+mod config;
 mod ffmpeg_spool;
 mod session;
 mod track;
 mod url_handler;
 
+use config::BotProfileConfig;
 use poise::serenity_prelude as serenity;
 use serde::{Deserialize, Serialize};
 use songbird::SerenityInit;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
-const DEFAULT_BOT_NAME: &str = "TidalCordRS";
-const DEFAULT_BOT_PROFILE_STATE_PATH: &str = "data/bot_profile_state.json";
 const DEFAULT_BOT_AVATAR_FILE_NAME: &str = "default-avatar.png";
 const DEFAULT_BOT_AVATAR_SOURCE: &str = "embedded:default-avatar.png";
 const DEFAULT_BOT_AVATAR_BYTES: &[u8] = include_bytes!("../assets/default-avatar.png");
-
-#[derive(Clone, Debug)]
-struct BotProfileConfig {
-    enabled: bool,
-    name: String,
-    avatar_path: Option<PathBuf>,
-    state_path: PathBuf,
-}
 
 #[derive(Debug)]
 struct BotProfileAvatar {
@@ -138,64 +130,6 @@ fn init_logging() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("tidalcordrs=info")),
         )
         .init();
-}
-
-fn required_env(name: &str) -> Result<String, commands::Error> {
-    match std::env::var(name) {
-        Ok(value) => Ok(value),
-        Err(std::env::VarError::NotPresent) => Err(format!("{name} must be set").into()),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
-    }
-}
-
-fn optional_env(name: &str, default: &str) -> Result<String, commands::Error> {
-    match std::env::var(name) {
-        Ok(value) => Ok(value),
-        Err(std::env::VarError::NotPresent) => Ok(default.to_string()),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
-    }
-}
-
-fn optional_nonempty_env(name: &str) -> Result<Option<String>, commands::Error> {
-    match std::env::var(name) {
-        Ok(value) if value.trim().is_empty() => Ok(None),
-        Ok(value) => Ok(Some(value)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
-    }
-}
-
-fn optional_env_parse<T>(name: &str, default: T) -> Result<T, commands::Error>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    match std::env::var(name) {
-        Ok(value) => value
-            .parse::<T>()
-            .map_err(|error| format!("Failed to parse {name}: {error}").into()),
-        Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} must be valid UTF-8").into()),
-    }
-}
-
-impl BotProfileConfig {
-    fn from_env() -> Result<Self, commands::Error> {
-        let name = optional_env("BOT_NAME", DEFAULT_BOT_NAME)?;
-        if name.trim().is_empty() {
-            return Err("BOT_NAME must not be empty".into());
-        }
-
-        Ok(Self {
-            enabled: optional_env_parse("BOT_PROFILE_SYNC_ENABLED", true)?,
-            name,
-            avatar_path: optional_nonempty_env("BOT_AVATAR_PATH")?.map(PathBuf::from),
-            state_path: PathBuf::from(optional_env(
-                "BOT_PROFILE_STATE_PATH",
-                DEFAULT_BOT_PROFILE_STATE_PATH,
-            )?),
-        })
-    }
 }
 
 async fn sync_bot_profile(
@@ -341,23 +275,17 @@ async fn run() -> Result<(), commands::Error> {
 
     // Load environment variables from .env file if it exists
     dotenvy::dotenv_override().ok();
-    let token = required_env("DISCORD_TOKEN")?;
-    let prefix = required_env("COMMAND_PREFIX")?;
-    let bot_profile_config = BotProfileConfig::from_env()?;
-    let spool_read_ahead_bytes = optional_env_parse::<u64>("SPOOL_READ_AHEAD_MIB", 16)?
-        .checked_mul(1024 * 1024)
-        .ok_or("SPOOL_READ_AHEAD_MIB is too large")?;
-    let collection_track_fetch_concurrency = optional_env_parse::<usize>(
-        "COLLECTION_TRACK_FETCH_CONCURRENCY",
-        session::DEFAULT_COLLECTION_TRACK_FETCH_CONCURRENCY,
-    )?;
-    if collection_track_fetch_concurrency == 0 {
-        return Err("COLLECTION_TRACK_FETCH_CONCURRENCY must be greater than 0".into());
-    }
+    let app_config = config::AppConfig::load()?;
+    let token = app_config.discord_token.clone();
+    let prefix = app_config.command_prefix.clone();
+    let bot_profile_config = app_config.bot_profile.clone();
+    let spool_read_ahead_bytes = app_config.technical.spool_read_ahead_bytes()?;
+    let collection_track_fetch_concurrency =
+        app_config.technical.collection_track_fetch_concurrency;
     let version = env!("CARGO_PKG_VERSION");
 
     // Initialize the Tidal session
-    let tidal_session = session::Session::new().await?;
+    let tidal_session = session::Session::new(app_config.tidal).await?;
 
     // Set the intents
     let intents = serenity::GatewayIntents::GUILDS

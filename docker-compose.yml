@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   tidalcordrs:
     image: ghcr.io/mrspookyangel/tidalcordrs:latest
@@ -7,29 +5,50 @@ services:
     restart: unless-stopped
     environment:
       # Credentials (change this)
-      DISCORD_TOKEN: "${DISCORD_TOKEN:?DISCORD_TOKEN is required}"
+      - DISCORD_TOKEN=${DISCORD_TOKEN:?DISCORD_TOKEN is required}
 
-      # Configuration (change these if you want)
-      COMMAND_PREFIX: "${COMMAND_PREFIX:-!}"
-      BOT_PROFILE_SYNC_ENABLED: "${BOT_PROFILE_SYNC_ENABLED:-true}"
-      BOT_NAME: "${BOT_NAME:-TidalCordRS}"
-      BOT_AVATAR_PATH: "${BOT_AVATAR_PATH:-}"
-      TZ: "${TZ:-UTC}"
+      # Runtime configuration
+      - CONFIG_PATH
+      - TZ=${TZ:-UTC}
 
-      # Technical Configuration (only change these if you know what you're doing)
-      SPOOL_READ_AHEAD_MIB: "${SPOOL_READ_AHEAD_MIB:-16}"
-      COLLECTION_TRACK_FETCH_CONCURRENCY: "${COLLECTION_TRACK_FETCH_CONCURRENCY:-8}"
-      BOT_PROFILE_STATE_PATH: "${BOT_PROFILE_STATE_PATH:-data/bot_profile_state.json}"
-      TIDAL_TOKEN_SESSION_PATH: "${TIDAL_TOKEN_SESSION_PATH:-data/tidal_token.json}"
-      TIDAL_CLIENT_ID: "${TIDAL_CLIENT_ID:-fX2JxdmntZWK0ixT}"
-      TIDAL_CLIENT_SECRET: "${TIDAL_CLIENT_SECRET:-1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg=}"
-      USER_AGENT: "${USER_AGENT:-Mozilla/5.0 (Linux; Android 10; uis8581a2h10_Automotive) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36}"
-      OAUTH_DEVICE_AUTH_URL: "${OAUTH_DEVICE_AUTH_URL:-https://auth.tidal.com/v1/oauth2/device_authorization}"
-      OAUTH_TOKEN_URL: "${OAUTH_TOKEN_URL:-https://auth.tidal.com/v1/oauth2/token}"
-      SESSIONS_URL: "${SESSIONS_URL:-https://api.tidal.com/v1/sessions}"
-      SEARCH_URL: "${SEARCH_URL:-https://api.tidal.com/v1/search}"
+      # Optional Portainer / Docker env overrides
+      - TIDALCORDRS_COMMAND_PREFIX
+      - TIDALCORDRS_BOT_PROFILE__SYNC_ENABLED
+      - TIDALCORDRS_BOT_PROFILE__NAME
+      - TIDALCORDRS_BOT_PROFILE__AVATAR_PATH
+      - TIDALCORDRS_BOT_PROFILE__STATE_PATH
+      - TIDALCORDRS_TECHNICAL__SPOOL_READ_AHEAD_MIB
+      - TIDALCORDRS_TECHNICAL__COLLECTION_TRACK_FETCH_CONCURRENCY
+      - TIDALCORDRS_TIDAL__TOKEN_SESSION_PATH
+      - TIDALCORDRS_TIDAL__CLIENT_ID
+      - TIDALCORDRS_TIDAL__CLIENT_SECRET
+      - TIDALCORDRS_TIDAL__USER_AGENT
+      - TIDALCORDRS_TIDAL__OAUTH_DEVICE_AUTH_URL
+      - TIDALCORDRS_TIDAL__OAUTH_TOKEN_URL
+      - TIDALCORDRS_TIDAL__SESSIONS_URL
+      - TIDALCORDRS_TIDAL__SEARCH_URL
+
+      # Legacy env overrides remain supported
+      - COMMAND_PREFIX
+      - BOT_PROFILE_SYNC_ENABLED
+      - BOT_NAME
+      - BOT_AVATAR_PATH
+      - BOT_PROFILE_STATE_PATH
+      - SPOOL_READ_AHEAD_MIB
+      - COLLECTION_TRACK_FETCH_CONCURRENCY
+      - TIDAL_TOKEN_SESSION_PATH
+      - TIDAL_CLIENT_ID
+      - TIDAL_CLIENT_SECRET
+      - USER_AGENT
+      - OAUTH_DEVICE_AUTH_URL
+      - OAUTH_TOKEN_URL
+      - SESSIONS_URL
+      - SEARCH_URL
     volumes:
       - app-data:/app/data
+      # To use a mounted TOML config, set CONFIG_PATH=/app/config/config.toml
+      # and uncomment the next line.
+      # - ./config.toml:/app/config/config.toml:ro
 
 volumes:
   app-data:

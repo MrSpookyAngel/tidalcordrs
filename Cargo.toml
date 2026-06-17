@@ -12,12 +12,13 @@ poise = "0.6.2"
 regex = "1.12.3"
 reqwest = { version = "0.13.2", features = ["form", "json", "query"] }
 rustls = { version = "0.23.38", features = ["ring"] }
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serenity = { version = "0.12.5", features = ["cache", "client", "gateway", "rustls_backend"] }
 songbird = { version = "0.6.0", features = ["builtin-queue"] }
 symphonia = { version = "0.5.5", default-features = false, features = ["ogg"] }
 tokio = { version = "1.52.1", features = ["full"] }
+toml = "0.9.9"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "local-time"] }
 url = "2.5.8"

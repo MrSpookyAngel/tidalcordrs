@@ -1,0 +1,25 @@
+# Copy this file to config.toml when you want file-based configuration.
+# Environment variables still override these values.
+
+command_prefix = "!"
+
+[bot_profile]
+sync_enabled = true
+name = "TidalCordRS"
+# Leave unset or empty to use the built-in avatar.
+avatar_path = ""
+state_path = "data/bot_profile_state.json"
+
+[technical]
+spool_read_ahead_mib = 16
+collection_track_fetch_concurrency = 8
+
+[tidal]
+token_session_path = "data/tidal_token.json"
+client_id = "fX2JxdmntZWK0ixT"
+client_secret = "1Nm5AfDAjxrgJFJbKNWLeAyKGVGmINuXPPLHVXAvxAg="
+user_agent = "Mozilla/5.0 (Linux; Android 10; uis8581a2h10_Automotive) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.101 Safari/537.36"
+oauth_device_auth_url = "https://auth.tidal.com/v1/oauth2/device_authorization"
+oauth_token_url = "https://auth.tidal.com/v1/oauth2/token"
+sessions_url = "https://api.tidal.com/v1/sessions"
+search_url = "https://api.tidal.com/v1/search"
