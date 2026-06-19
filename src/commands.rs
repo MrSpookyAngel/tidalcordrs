@@ -21,6 +21,7 @@ const SEARCH_SELECTION_TIMEOUT: Duration = Duration::from_secs(120);
 const QUEUE_PAGINATION_TIMEOUT: Duration = Duration::from_secs(120);
 const TRACK_INFO_TIMEOUT: Duration = Duration::from_secs(2);
 const ACTIVITY_NAME_MAX_CHARS: usize = 128;
+const DEFAULT_AUDIO_BITRATE: u32 = 64_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PlaybackStatusKind {
@@ -119,11 +120,17 @@ impl songbird::events::EventHandler for RepeatModeNotifier {
                     (RepeatMode::Queue, PlayMode::End) => {
                         let track = handle.data::<crate::track::Track>();
                         let mut handler = self.handler_lock.lock().await;
+                        let audio_bitrate = current_voice_channel_bitrate(
+                            &self.serenity_context,
+                            self.guild_id,
+                            &handler,
+                        );
                         match enqueue_track_with_spool(
                             &mut handler,
                             &track,
                             Duration::ZERO,
                             self.spool_read_ahead_bytes,
+                            audio_bitrate,
                         )
                         .await
                         {
@@ -1349,11 +1356,17 @@ async fn enqueue_track_at(
     start_position: Duration,
 ) -> Result<songbird::tracks::TrackHandle, Error> {
     let was_queue_empty = handler.queue().is_empty();
+    let audio_bitrate = current_voice_channel_bitrate(
+        ctx.serenity_context(),
+        ctx.guild_id().ok_or("Expected a guild ID")?,
+        handler,
+    );
     let handle = enqueue_track_with_spool(
         handler,
         track,
         start_position,
         ctx.data().spool_read_ahead_bytes,
+        audio_bitrate,
     )
     .await?;
 
@@ -1375,14 +1388,22 @@ async fn enqueue_track_with_spool(
     track: &crate::track::Track,
     start_position: Duration,
     spool_read_ahead_bytes: u64,
+    audio_bitrate: u32,
 ) -> Result<songbird::tracks::TrackHandle, Error> {
+    handler.set_bitrate(songbird::driver::Bitrate::Bits(audio_bitrate as i32));
+
     let ffmpeg_stream = if start_position.is_zero() {
-        crate::ffmpeg_spool::FfmpegStream::new(&track.stream_url, spool_read_ahead_bytes)
+        crate::ffmpeg_spool::FfmpegStream::new(
+            &track.stream_url,
+            spool_read_ahead_bytes,
+            audio_bitrate,
+        )
     } else {
         crate::ffmpeg_spool::FfmpegStream::new_at(
             &track.stream_url,
             spool_read_ahead_bytes,
             start_position,
+            audio_bitrate,
         )
     };
     let stream = songbird::input::Input::Lazy(Box::new(ffmpeg_stream));
@@ -1392,6 +1413,28 @@ async fn enqueue_track_with_spool(
     let handle = handler.enqueue(songbird_track).await;
 
     Ok(handle)
+}
+
+fn current_voice_channel_bitrate(
+    serenity_context: &serenity::client::Context,
+    guild_id: serenity::model::id::GuildId,
+    handler: &songbird::Call,
+) -> u32 {
+    let Some(channel_id) = handler.current_channel() else {
+        return DEFAULT_AUDIO_BITRATE;
+    };
+    let channel_id = serenity::model::id::ChannelId::new(channel_id.0.get());
+
+    serenity_context
+        .cache
+        .guild(guild_id)
+        .and_then(|guild| {
+            guild
+                .channels
+                .get(&channel_id)
+                .and_then(|channel| channel.bitrate)
+        })
+        .unwrap_or(DEFAULT_AUDIO_BITRATE)
 }
 
 async fn find_tracks_for_query(

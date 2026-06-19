@@ -7,6 +7,7 @@ pub struct FfmpegStream {
     url: String,
     spool_read_ahead_bytes: u64,
     start_position: Duration,
+    audio_bitrate: u32,
 }
 
 struct SpoolState {
@@ -251,15 +252,21 @@ impl Drop for SpoolReader {
 }
 
 impl FfmpegStream {
-    pub fn new(url: &str, spool_read_ahead_bytes: u64) -> Self {
-        Self::new_at(url, spool_read_ahead_bytes, Duration::ZERO)
+    pub fn new(url: &str, spool_read_ahead_bytes: u64, audio_bitrate: u32) -> Self {
+        Self::new_at(url, spool_read_ahead_bytes, Duration::ZERO, audio_bitrate)
     }
 
-    pub fn new_at(url: &str, spool_read_ahead_bytes: u64, start_position: Duration) -> Self {
+    pub fn new_at(
+        url: &str,
+        spool_read_ahead_bytes: u64,
+        start_position: Duration,
+        audio_bitrate: u32,
+    ) -> Self {
         Self {
             url: url.to_string(),
             spool_read_ahead_bytes,
             start_position,
+            audio_bitrate,
         }
     }
 
@@ -286,9 +293,9 @@ impl FfmpegStream {
         }
 
         let child = command
-            .args([
-                "-i", &self.url, "-vn", "-c:a", "libopus", "-f", "opus", "pipe:1",
-            ])
+            .args(["-i", &self.url, "-vn", "-c:a", "libopus", "-b:a"])
+            .arg(self.audio_bitrate.to_string())
+            .args(["-f", "opus", "pipe:1"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
