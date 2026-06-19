@@ -4179,7 +4179,7 @@ dependencies = [
 
 [[package]]
 name = "tidalcordrs"
-version = "3.2.0"
+version = "4.0.0"
 dependencies = [
  "dotenvy",
  "fastrand",
